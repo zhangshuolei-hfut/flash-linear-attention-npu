@@ -43,7 +43,7 @@ struct ChunkFwdOParams {
     const aclTensor *g = nullptr;
     const aclIntArray *cuSeqlensOptional = nullptr;
     const aclIntArray *chunkOffsetsOptional = nullptr;
-    float scale = 1.0;
+    double scale = 1.0;
     int64_t chunkSize = 64;
     const aclTensor *oOut = nullptr;
 };
@@ -115,7 +115,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     const aclTensor *g,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkOffsetsOptional,
-    float scale,
+    double scale,
     int64_t chunkSize,
     const aclTensor *oOut,
     uint64_t *workspaceSize,
