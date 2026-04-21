@@ -39,7 +39,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     const aclTensor *g,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkOffsetsOptional,
-    float scale,
+    double scale,
     int64_t chunkSize,
     const aclTensor *oOut,
     uint64_t *workspaceSize,

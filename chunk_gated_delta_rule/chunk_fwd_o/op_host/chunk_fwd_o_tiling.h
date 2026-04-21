@@ -27,7 +27,6 @@ TILING_DATA_FIELD_DEF(int64_t, kNumHead);
 TILING_DATA_FIELD_DEF(int64_t, vNumHead);
 TILING_DATA_FIELD_DEF(int64_t, kHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, vHeadDim);
-TILING_DATA_FIELD_DEF(float, scale);
 TILING_DATA_FIELD_DEF(int64_t, chunkSize);
 TILING_DATA_FIELD_DEF(int64_t, isVariedLen);
 TILING_DATA_FIELD_DEF(int64_t, tokenBatch);
@@ -38,6 +37,7 @@ TILING_DATA_FIELD_DEF(int64_t, hWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, attnWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, aftermaskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, maskWorkspaceOffset);
+TILING_DATA_FIELD_DEF(float, scale);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkFwdO, ChunkFwdOTilingData)

@@ -79,7 +79,7 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     }
     
     auto attrPtr = context->GetAttrs();
-    float scale = *(attrPtr->GetAttrPointer<float>(ATTR_SCALE_IDX));
+    float scale = *(attrPtr->GetAttrPointer<double>(ATTR_SCALE_IDX));
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
 
     auto dtype = context->GetInputTensor(0)->GetDataType();

@@ -9,9 +9,14 @@ import torch_npu
 from ml_dtypes import bfloat16
 from dataclasses import dataclass
 import math
+# import custom_ops
+import aclnn_extension
+
+torch.npu.config.allow_internal_format = False
+torch.npu.set_compile_mode(jit_compile=False)
+
 np.random.seed(1)
 torch.manual_seed(1)
-torch.npu.set_device(7)
 
 WORKSPACE = os.path.dirname(os.path.abspath(__file__))
 
@@ -267,22 +272,64 @@ if __name__ == "__main__":
     else:
         output_tensor = gen_ref_data(gdn_fwd_o_input, input_tensor)
 
+    # torch.npu.synchronize()
+    # result = custom_ops.npu_chunk_fwd_o(
+    #     input_tensor.q.npu(),
+    #     input_tensor.k.npu(),
+    #     input_tensor.v.npu(),
+    #     input_tensor.h.npu(),
+    #     input_tensor.g.npu(),
+    #     gdn_fwd_o_input.scale,
+    #     input_tensor.cu_seqlens,
+    #     input_tensor.chunk_offsets,
+    #     gdn_fwd_o_input.chunk_size
+    # )
+    # torch.npu.synchronize()
+
+    print("step 0: input prepared")
+
+    q = input_tensor.q.npu()
+    print("step 1: q ok", q.shape, q.dtype, q.device)
+
+    k = input_tensor.k.npu()
+    print("step 2: k ok", k.shape, k.dtype, k.device)
+
+    v = input_tensor.v.npu()
+    print("step 3: v ok", v.shape, v.dtype, v.device)
+
+    h = input_tensor.h.npu()
+    print("step 4: h ok", h.shape, h.dtype, h.device)
+
+    g = input_tensor.g.npu()
+    print("step 5: g ok", g.shape, g.dtype, g.device)
+
+    print("cu_seqlens =", input_tensor.cu_seqlens)
+    print("chunk_offsets =", input_tensor.chunk_offsets)
+    print("scale =", gdn_fwd_o_input.scale)
+    print("chunk_size =", gdn_fwd_o_input.chunk_size)
+
     torch.npu.synchronize()
-    result = torch_npu.npu_chunk_fwd_o(
-        input_tensor.q.npu(),
-        input_tensor.k.npu(),
-        input_tensor.v.npu(),
-        input_tensor.h.npu(),
-        input_tensor.g.npu(),
-        input_tensor.cu_seqlens,
-        input_tensor.chunk_offsets,
+    print("step 6: before custom op")
+
+    result = torch.ops.npu.npu_chunk_fwd_o(
+        q,
+        k,
+        v,
+        h,
+        g,
         gdn_fwd_o_input.scale,
-        gdn_fwd_o_input.chunk_size
+        cu_seqlens=input_tensor.cu_seqlens.tolist() if input_tensor.cu_seqlens is not None else None,
+        chunk_indices=input_tensor.chunk_offsets.flatten().tolist() if input_tensor.chunk_offsets is not None else None,
+        chunk_size=gdn_fwd_o_input.chunk_size
     )
+
+    print("step 7: after custom op")
     torch.npu.synchronize()
-    if gdn_fwd_o_input.use_actual_output:
-        output_tensor = parse_actual_output(gdn_fwd_o_input)
-    else:
-        output_tensor = gen_ref_data(gdn_fwd_o_input, input_tensor)
+    print("step 8: after synchronize")
+
+    save_data(input_tensor, output_tensor)
+    result.cpu().view(torch.int16).numpy().tofile(os.path.join(WORKSPACE, "data", "o_npu.bin"))
+    print("step 9: save done")
+
     save_data(input_tensor, output_tensor)
     result.cpu().view(torch.int16).numpy().tofile(os.path.join(WORKSPACE, "data", "o_npu.bin"))

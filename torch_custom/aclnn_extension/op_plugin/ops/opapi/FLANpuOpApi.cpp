@@ -126,7 +126,7 @@ at::Tensor npu_prepare_wy_repr_bwd_da(const at::Tensor & k, const at::Tensor & v
     return dA;
 }
 
-::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> npu_chunk_bwd_dqkwg(const at::Tensor & q, const at::Tensor & k, const at::Tensor & v, const at::Tensor & g, const at::Tensor & h, const at::Tensor & dox, const at::Tensor & dh, const at::Tensor & dv, int64_t chunk_size, at::OptionalIntArrayRef cu_seqlens, at::OptionalIntArrayRef chunk_indices, const c10::optional<at::Tensor> & w, const c10::optional<at::Tensor> & g_gamma, c10::optional<double> scale, c10::optional<bool> transpose_state_layout)
+::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> npu_chunk_bwd_dqkwg(const at::Tensor & q, const at::Tensor & k, const at::Tensor & v, const at::Tensor & g, const at::Tensor & h, const at::Tensor & dox, const at::Tensor & dh, const at::Tensor & dv, int64_t chunk_size, at::OptionalIntArrayRef cu_seqlens, at::OptionalIntArrayRef chunk_indices, const c10::optional<at::Tensor> & w, const c10::optional<at::Tensor> & g_gamma, c10::optional<double> scale, c10::optional<bool> use_exp2, c10::optional<bool> transpose_state_layout)
 {
     // 创建输出tensor
     at::Tensor dq = at::empty_like(q);
@@ -138,14 +138,15 @@ at::Tensor npu_prepare_wy_repr_bwd_da(const at::Tensor & k, const at::Tensor & v
     float scale_real = static_cast<float>(scale.value_or(1.0));
     const at::Tensor &w_ = c10::value_or_else(w, [] { return at::Tensor(); });
     const at::Tensor &g_gamma_ = c10::value_or_else(g_gamma, [] { return at::Tensor(); });
-    // int64_t transpose_state_layout_ = static_cast<int64_t>(transpose_state_layout.value_or(0));
+    bool use_exp2_ = static_cast<bool>(use_exp2.value_or(0));
+    bool transpose_state_layout_ = static_cast<bool>(transpose_state_layout.value_or(0));
 
     // 调用ACLNN算子
     EXEC_NPU_CMD_EXT(
         aclnnChunkBwdDqkwg,
         q, k, v, g, h,
         dox, dh, dv,
-        cu_seqlens, chunk_indices, w_, g_gamma_, scale_real, chunk_size,
+        cu_seqlens, chunk_indices, w_, g_gamma_, scale_real, chunk_size, use_exp2_, transpose_state_layout_,
         dq, dk, dw, dg
     );
     return std::make_tuple(dq, dk, dw, dg);
@@ -205,7 +206,7 @@ at::Tensor npu_chunk_fwd_o(
     int64_t B = k_sizes[0];
     int64_t T = k_sizes[2];
     int64_t K = k_sizes[3];
-    int64_t V = k_sizes[3];
+    int64_t V = u_sizes[3];
     int64_t HV = u_sizes[1];
     int64_t NT = 0;
     if (chunk_indices.has_value()) {
@@ -220,12 +221,9 @@ at::Tensor npu_chunk_fwd_o(
     at::Tensor v_new_out = at::empty_like(u);
     at::Tensor final_state_out;
     if (output_final_state_) {
-        auto initial_state_sizes = initial_state_.sizes();
-        int64_t BT = initial_state_sizes[2];
-
-        final_state_out = at::empty({B, HV, BT, K, V}, initial_state_.options());
-    } else {
-        final_state_out = at::Tensor();
+        int N = cu_seqlens.has_value() ? cu_seqlens->size() - 1 : B;
+        auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options();
+        final_state_out = at::empty({N, HV, K, V}, state_options);
     }
 
     // 调用ACLNN算子（两阶段调用：先获取工作空间大小，再执行）
