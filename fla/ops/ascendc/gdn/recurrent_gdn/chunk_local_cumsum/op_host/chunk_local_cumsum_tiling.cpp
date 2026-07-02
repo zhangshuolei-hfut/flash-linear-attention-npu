@@ -86,8 +86,8 @@ static ge::graphStatus TilingChunkLocalCumsum(gert::TilingContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, context->GetAttrs());
 
     const auto &gShape = context->GetInputShape(G_INDEX)->GetStorageShape();
-    OP_CHECK_IF(gShape.GetDimNum() != 3,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "g must be rank 3, but rank is %zu.",
+    OP_CHECK_IF(gShape.GetDimNum() < 3,
+                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "g must be rank >= 3 for [B, H, T, *], but rank is %zu.",
                                             gShape.GetDimNum()),
                 return ge::GRAPH_FAILED);
 
@@ -108,11 +108,10 @@ static ge::graphStatus TilingChunkLocalCumsum(gert::TilingContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, headFirstPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, outputDtype);
 
-    // [opt-1] Reject unsupported layout instead of silently using [B, T, H] addressing.
-    OP_CHECK_IF(*headFirstPtr,
+    OP_CHECK_IF(!*headFirstPtr,
                 OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
-                                            "head_first=true is not supported; ChunkLocalCumsum currently supports "
-                                            "only [B, T, H] layout."),
+                                            "head_first=false is not supported; ChunkLocalCumsum currently supports "
+                                            "only [B, H, T, *] layout."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(std::strcmp(outputDtype, "float32") != 0 && std::strcmp(outputDtype, "torch.float") != 0 &&
@@ -127,13 +126,19 @@ static ge::graphStatus TilingChunkLocalCumsum(gert::TilingContext *context)
                                             chunkSize),
                 return ge::GRAPH_FAILED);
 
-    int64_t b = gShape.GetDim(0);
-    int64_t t = gShape.GetDim(1);
-    int64_t h = gShape.GetDim(2);
-    OP_CHECK_IF(b <= 0 || t <= 0 || h <= 0,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "g shape must be positive, got [%ld, %ld, %ld].",
-                                            b, t, h),
+    int64_t batch = gShape.GetDim(0);
+    int64_t head = gShape.GetDim(1);
+    int64_t t = gShape.GetDim(2);
+    int64_t tail = 1;
+    for (size_t dimIdx = 3; dimIdx < gShape.GetDimNum(); ++dimIdx) {
+        tail *= gShape.GetDim(dimIdx);
+    }
+    OP_CHECK_IF(batch <= 0 || head <= 0 || t <= 0 || tail <= 0,
+                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
+                                            "g shape must be positive [B, H, T, *], got B=%ld, H=%ld, T=%ld, tail=%ld.",
+                                            batch, head, t, tail),
                 return ge::GRAPH_FAILED);
+    int64_t outer = batch * head;
 
     int64_t cuSeqlensElements = 0;
     auto cuSeqlensShapePtr = context->GetInputShape(CU_SEQLENS_INDEX);
@@ -152,13 +157,13 @@ static ge::graphStatus TilingChunkLocalCumsum(gert::TilingContext *context)
                     OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
                                                 "chunk_indices_out is required when cu_seqlens is not empty."),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(b != 1,
+        OP_CHECK_IF(batch != 1,
                     OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
-                                                "B must be 1 when cu_seqlens is provided, but got %ld.", b),
+                                                "B must be 1 when cu_seqlens is provided, but got %ld.", batch),
                     return ge::GRAPH_FAILED);
     }
 
-    int64_t btBase = (static_cast<int64_t>(1) << 17) / (h * chunkSize);
+    int64_t btBase = (static_cast<int64_t>(1) << 17) / (tail * chunkSize);
     int64_t blockT = NextPowerOfTwo(btBase);
     OP_CHECK_IF(blockT < chunkSize,
                 OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
@@ -181,21 +186,21 @@ static ge::graphStatus TilingChunkLocalCumsum(gert::TilingContext *context)
     OP_CHECK_IF(aivNum <= 0,
                 OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "aivNum is invalid."),
                 return ge::GRAPH_FAILED);
-    int64_t hTileNum = CeilDiv(h, H_TILE_SIZE);
-    int64_t fixedTaskNum = b * CeilDiv(t, chunkSize) * hTileNum;
-    int64_t varlenTaskNum = nt * hTileNum;
+    int64_t hTileNum = CeilDiv(tail, H_TILE_SIZE);
+    int64_t fixedTaskNum = outer * CeilDiv(t, chunkSize) * hTileNum;
+    int64_t varlenTaskNum = outer * nt * hTileNum;
     int64_t taskNum = isVarlen ? varlenTaskNum : fixedTaskNum;
     int64_t blockDim = std::max<int64_t>(1, std::min<int64_t>(aivNum, taskNum));
 
     auto tiling = context->GetTilingData<ChunkLocalCumsumTilingData>();
     OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
-    tiling->b = b;
+    tiling->b = outer;
     tiling->t = t;
-    tiling->h = h;
+    tiling->h = tail;
     tiling->chunkSize = chunkSize;
     tiling->blockT = blockT;
     tiling->numBlocks = nt;
-    tiling->totalElements = b * t * h;
+    tiling->totalElements = gShape.GetShapeSize();
     tiling->isVarlen = isVarlen ? 1 : 0;
     tiling->reverse = *reversePtr ? 1 : 0;
     tiling->headFirst = *headFirstPtr ? 1 : 0;

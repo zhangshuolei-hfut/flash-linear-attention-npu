@@ -49,7 +49,7 @@ public:
         this->Attr("chunk_size").AttrType(REQUIRED).Int();
         this->Attr("reverse").AttrType(OPTIONAL).Bool(false);
         this->Attr("scale").AttrType(OPTIONAL).Float(1.0f);
-        this->Attr("head_first").AttrType(OPTIONAL).Bool(false);
+        this->Attr("head_first").AttrType(OPTIONAL).Bool(true);
         this->Attr("output_dtype").AttrType(OPTIONAL).String("float32");
 
         OpAICoreConfig aicoreConfig;

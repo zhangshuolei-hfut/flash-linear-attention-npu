@@ -18,13 +18,13 @@
   正向模式 `reverse=false`：
 
   $$
-  out[b,t,h] = scale \times \sum_{k=chunk\_start}^{t} g[b,k,h]
+  out[b,h,t,...] = scale \times \sum_{k=chunk\_start}^{t} g[b,h,k,...]
   $$
 
   反向模式 `reverse=true`：
 
   $$
-  out[b,t,h] = scale \times \sum_{k=t}^{chunk\_end-1} g[b,k,h]
+  out[b,h,t,...] = scale \times \sum_{k=t}^{chunk\_end-1} g[b,h,k,...]
   $$
 
   其中 `chunk_start = floor(t / chunk_size) * chunk_size`，`chunk_end = min(chunk_start + chunk_size, T)`。
@@ -62,13 +62,13 @@ aclnnStatus aclnnChunkLocalCumsum(
 
 | 参数名 | 输入/输出 | 描述 |
 |--------|-----------|------|
-| g | 输入 | Device 侧 aclTensor，数据类型仅支持 FLOAT32，shape 为 `[B, T, H]` |
+| g | 输入 | Device 侧 aclTensor，数据类型仅支持 FLOAT32，shape 为 `[B, H, T, *]` |
 | cuSeqlensOptional | 输入 | 变长序列模式下的累积序列长度，可选参数。数据类型为 INT64 |
 | chunkIndicesOutOptional | 输入 | 变长序列模式下 block 到 `(seq_id, block_id)` 的映射，可选参数。数据类型为 INT64 |
 | chunkSize | 输入 | chunk 长度，必须为 2 的幂 |
 | reverse | 输入 | 是否执行反向 chunk 内累加 |
 | scale | 输入 | 输出缩放系数 |
-| headFirst | 输入 | 数据布局开关。当前仅支持 `false` |
+| headFirst | 输入 | 数据布局开关。当前仅支持 `true` |
 | outputDtypeOptional | 输入 | 输出 dtype 字符串。当前仅支持 `float32`、`torch.float`、`torch.float32` |
 | out | 输出 | Device 侧 aclTensor，数据类型仅支持 FLOAT32，shape 与 `g` 一致 |
 | workspaceSize | 输出 | 返回执行该算子所需的 workspace 大小 |
@@ -86,9 +86,9 @@ aclnnStatus aclnnChunkLocalCumsum(
 ## 输入约束
 
 1. **数据类型**：输入 `g` 和输出 `out` 仅支持 FLOAT32。
-2. **输入维度**：`g` 必须为 3D tensor，shape 为 `[B, T, H]`，且各维为正数。
+2. **输入维度**：`g` 必须为 rank >= 3 的 tensor，shape 为 `[B, H, T, *]`，且各维为正数。
 3. **chunkSize**：必须为 2 的幂。
-4. **数据布局**：当前仅支持 `[B, T, H]`，`headFirst=true` 会返回失败。
+4. **数据布局**：当前仅支持 `[B, H, T, *]`，`headFirst=false` 会返回失败。
 5. **输出 dtype**：`outputDtypeOptional` 仅支持 `float32`、`torch.float`、`torch.float32`。
 6. **变长模式**：当 `cuSeqlensOptional` 非空时，`B` 必须为 1，`chunkIndicesOutOptional` 必须非空且元素个数为偶数。
 
@@ -120,7 +120,7 @@ auto ret = aclnnChunkLocalCumsumGetWorkspaceSize(
     emptyCuSeqlensTensor,
     emptyChunkIndicesTensor,
     64,
-    false,
+    true,
     1.0,
     false,
     const_cast<char *>("float32"),
@@ -143,7 +143,7 @@ out = torch.ops.npu.npu_chunk_local_cumsum(
     chunk_indices_out=chunk_indices_out,
     reverse=False,
     scale=1.0,
-    head_first=False,
+    head_first=True,
     output_dtype="float32",
 )
 ```
@@ -156,7 +156,7 @@ bash torch_custom/fla_npu/test/test.sh --device 0 --op chunk_local_cumsum
 
 ## 实现说明
 
-- Host tiling 根据 `g` 的 `[B, T, H]`、`chunkSize`、`cuSeqlensOptional` 和 `chunkIndicesOutOptional` 计算任务数与 `blockDim`。
-- 固定长度模式按 `(batch, chunk, head tile)` 划分任务，避免多个 AIV core 写同一段 head tile。
+- Host tiling 根据 `g` 的 `[B, H, T, *]`、`chunkSize`、`cuSeqlensOptional` 和 `chunkIndicesOutOptional` 计算任务数与 `blockDim`。
+- 固定长度模式按 `(batch * head, chunk, tail tile)` 划分任务，避免多个 AIV core 写同一段尾部连续维度。
 - 变长模式使用 `chunkIndicesOutOptional` 中的 `(seq_id, block_id)` 定位当前序列 chunk，并通过 `cuSeqlensOptional` 获取序列边界。
 - Kernel 仅使用 AIV，输出写回 `out`。

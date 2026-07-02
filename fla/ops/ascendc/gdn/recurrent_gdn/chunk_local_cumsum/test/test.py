@@ -1,3 +1,5 @@
+"""Local test for the ChunkLocalCumsum custom NPU operator."""
+
 import math
 import os
 from functools import reduce
@@ -29,7 +31,8 @@ def _block_t(shape: Tuple[int, ...], chunk_size: int) -> int:
 
 def prepare_chunk_indices(cu_seqlens: torch.Tensor, block_t: int) -> torch.Tensor:
     rows = []
-    for seq_idx, (start, end) in enumerate(zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())):
+    pairs = zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())
+    for seq_idx, (start, end) in enumerate(pairs):
         num_blocks = math.ceil((end - start) / block_t)
         for block_idx in range(num_blocks):
             rows.append((seq_idx, block_idx))
@@ -75,11 +78,10 @@ def run_case(
 ) -> None:
     torch.manual_seed(sum(ord(ch) for ch in name))
     g_cpu = torch.randn(shape, dtype=torch.float32)
-    g_npu = g_cpu.npu()
 
+    cu_seqlens_cpu = None
     cu_seqlens_npu = None
     chunk_indices_npu = None
-    cu_seqlens_cpu = None
     if cu_seqlens_values is not None:
         cu_seqlens_cpu = torch.tensor(cu_seqlens_values, dtype=torch.long)
         block_t = _block_t(shape, chunk_size)
@@ -88,7 +90,7 @@ def run_case(
         chunk_indices_npu = chunk_indices_cpu.npu()
 
     actual = torch.ops.npu.npu_chunk_local_cumsum(
-        g_npu,
+        g_cpu.npu(),
         chunk_size,
         cu_seqlens=cu_seqlens_npu,
         chunk_indices_out=chunk_indices_npu,
@@ -103,16 +105,21 @@ def run_case(
     print(f"[PASS] {name}: shape={shape}, chunk_size={chunk_size}, reverse={reverse}, scale={scale}")
 
 
-if __name__ == "__main__":
-    run_case("fixed_bht_forward", (9, 2, 128), chunk_size=64)
-    run_case("fixed_bht_reverse_scale", (9, 2, 128), chunk_size=64, reverse=True, scale=0.25)
-    run_case("fixed_bhtd_forward", (2, 3, 129, 8), chunk_size=64)
-    run_case("varlen_bhtd_forward", (1, 8, 3580, 8), chunk_size=64, cu_seqlens_values=[0, 3580])
+def main() -> int:
+    run_case("fixed_forward_tail1", (9, 2, 128), chunk_size=64)
+    run_case("fixed_reverse_scale_tail1", (9, 2, 128), chunk_size=64, reverse=True, scale=0.25)
+    run_case("fixed_forward_4d", (2, 3, 129, 8), chunk_size=64)
+    run_case("varlen_forward_4d", (1, 8, 3580, 8), chunk_size=64, cu_seqlens_values=[0, 3580])
     run_case(
-        "varlen_bhtd_reverse_scale",
+        "varlen_reverse_scale_4d",
         (1, 8, 3580, 8),
         chunk_size=64,
         reverse=True,
         scale=-0.5,
         cu_seqlens_values=[0, 1024, 2048, 3580],
     )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

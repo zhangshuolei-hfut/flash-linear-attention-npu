@@ -341,10 +341,12 @@ private:
         int64_t blockIdx = static_cast<int64_t>(GetBlockIdx());
         int64_t hTileSize = chunkFastPath_ ? fastHTileSize_ : H_TILE_SIZE;
         int64_t hTileNum = CeilDivInt64(tiling_->h, hTileSize);
-        int64_t taskNum = tiling_->numBlocks * hTileNum;
+        int64_t taskNum = tiling_->b * tiling_->numBlocks * hTileNum;
         for (int64_t taskIdx = blockIdx; taskIdx < taskNum; taskIdx += blockNum) {
             int64_t hTileIdx = taskIdx % hTileNum;
-            int64_t globalBlock = taskIdx / hTileNum;
+            int64_t blockLinear = taskIdx / hTileNum;
+            int64_t globalBlock = blockLinear % tiling_->numBlocks;
+            int64_t outerIdx = blockLinear / tiling_->numBlocks;
             int64_t hStart = hTileIdx * hTileSize;
             int64_t hLen = MinInt64(hTileSize, tiling_->h - hStart);
             int64_t seqId = chunkIndicesGm_.GetValue(globalBlock * 2);
@@ -354,7 +356,7 @@ private:
             int64_t seqLen = eos - bos;
             int64_t tStart = localBlock * tiling_->blockT;
             int64_t tEnd = MinInt64(tStart + tiling_->blockT, seqLen);
-            int64_t baseOffset = bos * tiling_->h;
+            int64_t baseOffset = outerIdx * tiling_->t * tiling_->h + bos * tiling_->h;
             for (int64_t chunkStart = tStart; chunkStart < tEnd; chunkStart += tiling_->chunkSize) {
                 int64_t chunkEnd = MinInt64(chunkStart + tiling_->chunkSize, tEnd);
                 if (chunkFastPath_) {

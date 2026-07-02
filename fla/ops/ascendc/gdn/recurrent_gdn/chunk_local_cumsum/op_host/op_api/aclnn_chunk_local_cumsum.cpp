@@ -29,7 +29,7 @@ struct ChunkLocalCumsumParams {
     int64_t chunkSize = 0;
     bool reverse = false;
     double scale = 1.0;
-    bool headFirst = false;
+    bool headFirst = true;
     const char *outputDtypeOptional = "float32";
     const aclTensor *out = nullptr;
 };
