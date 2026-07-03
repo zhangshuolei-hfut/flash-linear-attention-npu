@@ -1,22 +1,22 @@
-# KDA 正向 AscendC 算子设计
+# Kimi Delta Attention（KDA）正向 AscendC 算子设计
 
 ## 1. 范围
 
-本文档说明本 PR 中 KDA 正向算子的实现设计。目标是提供一套支持 `gk` 的 AscendC 算子栈，并在语义完全一致的地方复用已有 GDN 正向状态传播逻辑。
+本文档说明本代码合入请求（Pull Request, PR）中 KDA 正向算子的实现设计。目标是提供一套支持 `gk` 的 AscendC 算子栈，并在语义完全一致的地方复用已有 Gated DeltaNet（GDN）正向状态传播逻辑。
 
 当前 PR 范围：
 
-- 新增 KDA 正向 `ChunkKdaFwd` AscendC L0/L2 算子。
+- 新增 KDA 正向 `ChunkKdaFwd` AscendC 算子内核/算子接口层（L0/L2）算子。
 - 新增辅助算子 `KdaLayoutSwap12` 和 `KdaGateCumsum`。
 - 为 `ChunkGatedDeltaRuleFwdH` 增加可选 `gk` 入参，因为 KDA 复用 GDN 的状态传播。
 - 新增 PyTorch 自定义接口 `npu_chunk_kda_fwd` 和参考测试。
-- 验证 `K=128, V=128, chunk_size=64` 下 dense BSND/TND 兼容输入，以及 BNSD/NTD 直通性能布局。
+- 验证 `K=128, V=128, chunk_size=64` 下 dense batch-sequence-head-dim/token-head-dim（BSND/TND）兼容输入，以及 batch-head-sequence-dim/head-token-dim（BNSD/NTD）直通性能布局。
 
 不在当前 PR 范围：
 
 - KDA 反向算子。
-- `V=256` 性能模板。`V=256` 应使用独立模板，因为 UB/L1 预算和 cube tiling 与 `V=128` 不同。
-- 高吞吐的非 chunk 对齐 varlen partial chunk 路径。公开 API 保留 `cu_seqlens` 和 `chunk_indices`，但高 `K/V` 非 chunk 对齐 varlen 需要专门的 partial chunk 同步路径，验证完成前不应宣称已优化。
+- `V=256` 性能模板。`V=256` 应使用独立模板，因为统一缓冲/一级缓存（UB/L1）预算和 cube tiling 与 `V=128` 不同。
+- 高吞吐的非 chunk 对齐变长序列（varlen）非完整 chunk（partial chunk）路径。公开对外接口（Application Programming Interface, API）保留 `cu_seqlens` 和 `chunk_indices`，但高 `K/V` 非 chunk 对齐 varlen 需要专门的 partial chunk 同步路径，验证完成前不应宣称已优化。
 
 ## 2. 对标语义
 
@@ -37,8 +37,8 @@ o         = qg @ h_prev * scale + Aqk @ v_new
 - `gk` 是 log2 空间下 key gate 的累积值。
 - `qg` 是 `q * exp2(gk)` 的中间张量。
 - `kg` 不是 `gk` 的笔误，而是 key-gated k 中间张量。kernel 中保存的 `kg = k * exp2(-gk)`；状态更新时结合当前 chunk 的 `g_last` 后，数学上等价于 `kg_state = k * exp2(g_last - gk)`。
-- AscendC vector pipe 中使用 `exp(x * ln2)` 实现 `exp2(x)`。
-- `final_state` 遵循三方对标实现和 GDN 语义，固定为 `float32`，即使 `q/k/v/o` 是 `fp16` 或 `bf16`。
+- AscendC 向量流水（vector pipe）中使用 `exp(x * ln2)` 实现 `exp2(x)`。
+- `final_state` 遵循三方对标实现和 GDN 语义，固定为 `float32`，即使 `q/k/v/o` 是 16 位浮点（fp16）或 Brain Floating Point 16（bf16）。
 
 ## 3. 对外接口
 
@@ -64,18 +64,20 @@ torch.ops.npu.npu_chunk_kda_fwd(
 )
 ```
 
-支持的 layout 语义：
+支持的内存排布（layout）语义：
 
 - BSND：`q/k: [B, T, H, K]`，`v: [B, T, HV, V]`，`gk: [B, T, HV, K]`，`beta: [B, T, HV]`。
 - BNSD：`q/k: [B, H, T, K]`，`v: [B, HV, T, V]`，`gk: [B, HV, T, K]`，`beta: [B, HV, T]`。
 - TND：`q/k: [T, H, K]`，`v: [T, HV, V]`，`gk: [T, HV, K]`，`beta: [T, HV]`。
 - NTD：`q/k: [H, T, K]`，`v: [HV, T, V]`，`gk: [HV, T, K]`，`beta: [HV, T]`。
 
+其中 `B/T/H/HV/K/V` 分别表示 batch、token 序列长度、query/key head 数、value head 数、key 维度和 value 维度。
+
 BNSD 和 NTD 是性能布局，适用于上游 causal conv 已经完成数据排布转换的流水线。BSND 和 TND 是兼容布局，进入 kernel 前通过 `KdaLayoutSwap12` 转成内部布局。
 
-支持的 dtype 语义：
+支持的数据类型（dtype）语义：
 
-- `q/k/v/o/Aqk/Akk/w/u/qg/kg/v_new/h`：根据张量角色跟随 `q` 或 `v` 的 dtype，算子注册覆盖 `fp16`、`bf16` 和 `fp32`；其中 `kg` 表示 key-gated k 中间张量，不是 `gk` 输入。
+- `q/k/v/o/Aqk/Akk/w/u/qg/kg/v_new/h`：根据张量角色跟随 `q` 或 `v` 的 dtype，算子注册覆盖 `fp16`、`bf16` 和 32 位浮点（fp32）；其中 `kg` 表示 key-gated k 中间张量，不是 `gk` 输入。
 - `gk/beta`：PyTorch 层接受 `fp32` 或 `bf16`，进入 `ChunkKdaFwd` 前统一 cast 到 `fp32`。
 - `initial_state/final_state`：固定为 `fp32`。
 
@@ -109,11 +111,11 @@ stage 3: 启用 post-WU cube 时后处理 w/kg/u
 
 `ChunkGatedDeltaRuleFwdH` 扩展为可接收可选 `gk`。这是 KDA 复用状态传播的最小依赖；除该正向状态传播复用点外，不扩大修改 GDN 算子族。
 
-BNSD/NTD split forward 中，raw `o/Aqk/Akk/w/u/qg/kg/v_new/h` 存放在 executor 管理的临时张量里。L2 最后一步使用同 layout 的 `ViewCopy` 写入用户输出。这样可以避免把用户输出张量作为 custom L0 和 elewise L0 之间的生产者-消费者中间张量，否则可能触发非法 tiling 或 workspace 推导。
+BNSD/NTD split forward 中，未做最终后处理（raw）的 `o/Aqk/Akk/w/u/qg/kg/v_new/h` 存放在 executor 管理的临时张量里。L2 最后一步使用同 layout 的 `ViewCopy` 写入用户输出。这样可以避免把用户输出张量作为 custom L0 和逐元素 L0 算子（elementwise L0, elewise L0）之间的生产者-消费者中间张量，否则可能触发非法 tiling 或 workspace 推导。
 
 ## 5. L0 Kernel 设计
 
-`ChunkKdaFwd` 内部包含 AIV 和 AIC 两类工作，通过跨核 flag 成对协作。
+`ChunkKdaFwd` 内部包含向量侧（AI Vector, AIV）和矩阵侧（AI Core/Cube, AIC）两类工作，通过跨核 flag 成对协作。
 
 关键路径：
 
@@ -122,10 +124,10 @@ BNSD/NTD split forward 中，raw `o/Aqk/Akk/w/u/qg/kg/v_new/h` 存放在 executo
   - AIV 计算 `qg = q * exp2(gk)`、`w seed = k * exp2(gk)`、`kg = k * exp2(-gk)`。
   - 行输入和输出使用 double-buffer 队列。
 - `Aqk/Akk` raw score：
-  - 目标 `K>=16` 路径使用 Catlass cube GEMM。
+  - 目标 `K>=16` 路径使用 Catlass cube 通用矩阵乘（General Matrix Multiplication, GEMM）。
   - scalar fallback 仅作为非目标 shape 的 correctness fallback，不能作为目标性能路径。
 - `Akk` 求逆：
-  - 完整 `BT=64` 使用 cube 辅助的 blocked matrix-chain iteration。
+  - 完整 block token 长度（BT）为 64 时，使用 cube 辅助的 blocked matrix-chain iteration。
   - solve scratch 在状态传播消费 `h` 之前暂存在 `h` workspace slot 中。
 - `w/u` 后处理：
   - 完整 `BT=64` 且 `K/V` 对齐时，使用 cube GEMM 计算 `Akk @ w` 和 `Akk @ v_new`。
@@ -154,7 +156,7 @@ final_state: [seq_num, HV, K, V]，fp32
 
 UB 使用原则：
 
-- GM/UB 搬运使用 `DataCopy` 或 `DataCopyPad`。
+- 全局内存/统一缓冲（GM/UB）搬运使用 `DataCopy` 或 `DataCopyPad`。
 - 目标路径避免使用 `GetValue` 和 `SetValue`。
 - 复用大块 UB arena 做矩阵和向量 staging。
 - `V=128` 和 `V=256` 模板保持独立，因为二者的 UB 驻留和 tile 复用计划不同。
@@ -166,6 +168,8 @@ UB 使用原则：
 - `chunk_kda_fwd`、`chunk_gated_delta_rule_fwd_h`、`kda_layout_swap12` 和 `kda_gate_cumsum` custom package 构建通过。
 
 精度验证：
+
+以下验证 shape 中，`H_K/H_V` 表示 key/value head 数。
 
 - 小 shape BSND/TND/BNSD/NTD 单测对齐 `tests/reference/chunk_kda_reference.py` 并通过。
 - 目标 sampled BNSD `B=1, H_K=1, H_V=2, T=16384, K=128, V=128, chunk_size=64` 通过：
@@ -193,4 +197,4 @@ UB 使用原则：
 1. 增加 dedicated partial-chunk varlen 路径，保证每个参与 subblock 的 AIC/AIV flag 计数平衡，并确保 cube 路径不会消费有效 chunk 外的脏行。
 2. 增加 `V=256` 模板，明确 UB/L1 驻留计划，而不是拉伸 `V=128` 模板。
 3. 将 KDA 反向算子放到独立 PR 中实现，并复用相同的 `gk` 和 state dtype 约定。
-4. varlen partial 路径稳定后，补充 race、memory、init 和 sync sanitizer 验证。
+4. varlen partial 路径稳定后，补充 race、memory、init 和 sync 内存/同步检查工具（sanitizer）验证。
