@@ -147,8 +147,8 @@ private:
         LocalTensor<float> betaLocal = betaQueue_.template DeQue<float>();
 
         const int64_t scoreBaseOffset = task * BT_ * BT_;
-        const int64_t outBaseOffset = ((b * T_ + rowStart) * H_ + h) * BT_;
-        const int64_t outRowStride = H_ * BT_;
+        const int64_t outBaseOffset = ((b * H_ + h) * T_ + rowStart) * BT_;
+        const int64_t outRowStride = BT_;
         LocalTensor<float> scoreTileLocal = scoreTileBuf_.Get<float>();
         LocalTensor<float> outTileLocal = outTileBuf_.Get<float>();
         LocalTensor<float> gateLocal = gateBuf_.Get<float>();
