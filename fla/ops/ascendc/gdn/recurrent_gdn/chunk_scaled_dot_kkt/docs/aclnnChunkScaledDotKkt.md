@@ -49,7 +49,7 @@ aclnnStatus aclnnChunkScaledDotKkt(
 
 | 参数名 | 输入/输出 | 描述 |
 | -- | -- | -- |
-| k | 输入 | key 张量，Device 侧 aclTensor，shape 为 `[B,H,T,K]`，数据类型为 FLOAT16 |
+| k | 输入 | key 张量，Device 侧 aclTensor，shape 为 `[B,H,T,K]`，数据类型为 FLOAT16 或 BF16 |
 | g | 输入 | cumulative gate 张量，Device 侧 aclTensor，shape 为 `[B,H,T]`，数据类型为 FLOAT |
 | beta | 输入 | beta 缩放张量，Device 侧 aclTensor，shape 为 `[B,H,T]`，数据类型为 FLOAT |
 | chunkSize | 输入 | chunk 大小，仅支持 `16`、`32`、`64`、`128` |
@@ -68,7 +68,7 @@ aclnnStatus aclnnChunkScaledDotKkt(
 
 ## 输入约束
 
-1. `k` 仅支持 FLOAT16。
+1. `k` 支持 FLOAT16 和 BF16。
 2. `g` 和 `beta` 仅支持 FLOAT。
 3. `k` shape 为 `[B,H,T,K]`，`g`/`beta` shape 为 `[B,H,T]`。
 4. `chunkSize` 仅支持 `16`、`32`、`64`、`128`。
@@ -103,7 +103,7 @@ torch.ops.npu.npu_chunk_scaled_dot_kkt(
 
 | 参数 | 类型 | 描述 |
 | -- | -- | -- |
-| k | Tensor | shape 为 `[B,H,T,K]`，dtype 为 `torch.float16` |
+| k | Tensor | shape 为 `[B,H,T,K]`，dtype 为 `torch.float16` 或 `torch.bfloat16` |
 | g | Tensor | shape 为 `[B,H,T]`，dtype 为 `torch.float32` |
 | beta | Tensor | shape 为 `[B,H,T]`，dtype 为 `torch.float32` |
 | chunk_size | int | chunk 大小，默认 64 |

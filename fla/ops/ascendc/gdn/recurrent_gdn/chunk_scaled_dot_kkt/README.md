@@ -59,7 +59,7 @@ torch.ops.npu.npu_chunk_scaled_dot_kkt(
 
 | 参数 | 数据类型 | Shape | 是否必须 | 描述 |
 | -- | -- | -- | -- | -- |
-| k | FLOAT16 | `[B,H,T,K]` | 是 | key 张量，head-first 排布 |
+| k | FLOAT16/BF16 | `[B,H,T,K]` | 是 | key 张量，head-first 排布 |
 | g | FLOAT | `[B,H,T]` | 是 | chunk 内 cumulative gate，head-first 排布 |
 | beta | FLOAT | `[B,H,T]` | 是 | 每个 token/head 的缩放系数，head-first 排布 |
 | chunk_size | INT | - | 否 | chunk 大小，默认 64 |

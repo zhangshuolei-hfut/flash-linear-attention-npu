@@ -17,13 +17,15 @@ constexpr int32_t BRCB_ROWS = 8;
 constexpr int32_t UB_ALIGN_BYTES = 32;
 constexpr MatmulConfig CHUNK_SCALED_DOT_KKT_MM_CFG = GetNormalConfig(true);
 
-using AType = matmul::MatmulType<TPosition::GM, CubeFormat::ND, half>;
-using BType = matmul::MatmulType<TPosition::GM, CubeFormat::ND, half, true, LayoutMode::NONE, false>;
 using CType = matmul::MatmulType<TPosition::GM, CubeFormat::ND, float>;
 using BiasType = matmul::MatmulType<TPosition::GM, CubeFormat::ND, float>;
 
+template <typename KType>
 class ChunkScaledDotKkt {
 public:
+    using AType = matmul::MatmulType<TPosition::GM, CubeFormat::ND, KType>;
+    using BType = matmul::MatmulType<TPosition::GM, CubeFormat::ND, KType, true, LayoutMode::NONE, false>;
+
     __aicore__ inline ChunkScaledDotKkt() {}
 
     __aicore__ inline void Init(GM_ADDR k,
@@ -55,7 +57,7 @@ public:
         usedAivNum_ = static_cast<int64_t>(usedAivNum);
         btAlign_ = static_cast<int64_t>(btAlign);
 
-        kGm.SetGlobalBuffer((__gm__ half *)k, B_ * H_ * T_ * K_);
+        kGm.SetGlobalBuffer((__gm__ KType *)k, B_ * H_ * T_ * K_);
         gGm.SetGlobalBuffer((__gm__ float *)g, B_ * H_ * T_);
         betaGm.SetGlobalBuffer((__gm__ float *)beta, B_ * H_ * T_);
         aGm.SetGlobalBuffer((__gm__ float *)a, B_ * T_ * H_ * BT_);
@@ -316,7 +318,7 @@ private:
     TBuf<TPosition::VECCALC> gateBuf_;
     TBuf<TPosition::VECCALC> rowBrcbBuf_;
 
-    GlobalTensor<half> kGm;
+    GlobalTensor<KType> kGm;
     GlobalTensor<float> gGm;
     GlobalTensor<float> betaGm;
     GlobalTensor<float> aGm;

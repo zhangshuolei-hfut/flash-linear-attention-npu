@@ -3,7 +3,7 @@
 
 using namespace AscendC;
 
-template <uint32_t CHUNK_KEY>
+template <uint32_t D_T_K, uint32_t CHUNK_KEY>
 __global__ __aicore__ void chunk_scaled_dot_kkt(GM_ADDR k,
                                                 GM_ADDR g,
                                                 GM_ADDR beta,
@@ -15,7 +15,7 @@ __global__ __aicore__ void chunk_scaled_dot_kkt(GM_ADDR k,
     GET_TILING_DATA_WITH_STRUCT(ChunkScaledDotKktTilingData, tilingData, tiling);
 
     TPipe pipe;
-    NsChunkScaledDotKkt::ChunkScaledDotKkt op;
+    NsChunkScaledDotKkt::ChunkScaledDotKkt<DTYPE_K> op;
     REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), op.scoreMatmul, &tilingData.cubeTilingData);
     GM_ADDR userWorkspace = GetUserWorkspace(workspace);
     op.Init(k, g, beta, A, userWorkspace, tilingData.B, tilingData.H, tilingData.T, tilingData.K, tilingData.BT,

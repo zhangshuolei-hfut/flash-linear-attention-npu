@@ -353,8 +353,9 @@ at::Tensor npu_chunk_scaled_dot_kkt(
     TORCH_CHECK(k.dim() == 4, "npu_chunk_scaled_dot_kkt: k must be [B,H,T,K], got ", k.sizes());
     TORCH_CHECK(g.dim() == 3, "npu_chunk_scaled_dot_kkt: g must be [B,H,T], got ", g.sizes());
     TORCH_CHECK(beta.dim() == 3, "npu_chunk_scaled_dot_kkt: beta must be [B,H,T], got ", beta.sizes());
-    TORCH_CHECK(k.scalar_type() == c10::ScalarType::Half,
-        "npu_chunk_scaled_dot_kkt: k dtype must be float16, got ", k.scalar_type());
+    TORCH_CHECK(
+        k.scalar_type() == c10::ScalarType::Half || k.scalar_type() == c10::ScalarType::BFloat16,
+        "npu_chunk_scaled_dot_kkt: k dtype must be float16 or bfloat16, got ", k.scalar_type());
     TORCH_CHECK(g.scalar_type() == c10::ScalarType::Float,
         "npu_chunk_scaled_dot_kkt: g dtype must be float32, got ", g.scalar_type());
     TORCH_CHECK(beta.scalar_type() == c10::ScalarType::Float,

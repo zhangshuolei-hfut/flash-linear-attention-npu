@@ -29,6 +29,7 @@ class Case:
     T: int
     K: int
     BT: int
+    dtype: torch.dtype = torch.float16
 
 
 CASES = (
@@ -38,6 +39,10 @@ CASES = (
     Case(1, 2, 96, 32, 32),
     Case(2, 4, 128, 64, 64),
     Case(1, 2, 160, 32, 128),
+    Case(1, 2, 17, 8, 16, torch.bfloat16),
+    Case(2, 3, 64, 16, 16, torch.bfloat16),
+    Case(1, 2, 96, 32, 32, torch.bfloat16),
+    Case(2, 4, 128, 64, 64, torch.bfloat16),
 )
 
 
@@ -80,7 +85,7 @@ def chunk_scaled_dot_kkt_reference(
 
 def make_inputs(case: Case, seed: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(seed)
-    k = (torch.randn(case.B, case.H, case.T, case.K, dtype=torch.float32) * 0.2).half()
+    k = (torch.randn(case.B, case.H, case.T, case.K, dtype=torch.float32) * 0.2).to(case.dtype)
     gate_delta = torch.randn(case.B, case.H, case.T, dtype=torch.float32) * 0.02
     g = torch.empty_like(gate_delta)
     for start in range(0, case.T, case.BT):
@@ -122,7 +127,7 @@ def _check_zero_regions(out: torch.Tensor, case: Case) -> float:
 
 
 def run_case(case: Case, seed: int, cpu_only: bool) -> bool:
-    print(f"Case B={case.B} H={case.H} T={case.T} K={case.K} BT={case.BT}")
+    print(f"Case B={case.B} H={case.H} T={case.T} K={case.K} BT={case.BT} dtype={case.dtype}")
     k, g, beta = make_inputs(case, seed)
     golden = chunk_scaled_dot_kkt_reference(k, g, beta, case.BT)
 

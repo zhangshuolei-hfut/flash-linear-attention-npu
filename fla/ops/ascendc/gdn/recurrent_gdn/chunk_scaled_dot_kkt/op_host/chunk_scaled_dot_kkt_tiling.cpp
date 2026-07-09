@@ -45,6 +45,21 @@ uint64_t ChunkKey(uint64_t chunkSize)
     return 0;
 }
 
+matmul_tiling::DataType MatmulKDataType(ge::DataType dtype)
+{
+    return dtype == ge::DT_BF16 ? matmul_tiling::DataType::DT_BF16 : matmul_tiling::DataType::DT_FLOAT16;
+}
+
+uint64_t DtypeKey(ge::DataType dtype)
+{
+    return dtype == ge::DT_BF16 ? 20 : 10;
+}
+
+uint64_t TilingKey(ge::DataType dtype, uint64_t chunkSize)
+{
+    return DtypeKey(dtype) + (ChunkKey(chunkSize) << 8);
+}
+
 bool Shape3Equal(const gert::Shape &shape, int64_t b, int64_t h, int64_t t)
 {
     return shape.GetDimNum() == 3 && shape.GetDim(0) == b && shape.GetDim(1) == h && shape.GetDim(2) == t;
@@ -62,15 +77,16 @@ bool MulOverflow(uint64_t a, uint64_t b, uint64_t *out)
     return false;
 }
 
-ge::graphStatus BuildCubeTiling(uint64_t bt, uint64_t k, ChunkScaledDotKktTilingData &tiling)
+ge::graphStatus BuildCubeTiling(uint64_t bt, uint64_t k, ge::DataType kDtype, ChunkScaledDotKktTilingData &tiling)
 {
     matmul_tiling::MatmulApiTiling mm;
+    const matmul_tiling::DataType matmulKType = MatmulKDataType(kDtype);
     if (mm.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
-                    matmul_tiling::DataType::DT_FLOAT16, false) != 0) {
+                    matmulKType, false) != 0) {
         return ge::GRAPH_FAILED;
     }
     if (mm.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
-                    matmul_tiling::DataType::DT_FLOAT16, true) != 0) {
+                    matmulKType, true) != 0) {
         return ge::GRAPH_FAILED;
     }
     if (mm.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
@@ -123,8 +139,8 @@ ge::graphStatus TilingFunc(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
 
-    if (context->GetInputDesc(0)->GetDataType() != ge::DT_FLOAT16 ||
-        context->GetInputDesc(1)->GetDataType() != ge::DT_FLOAT ||
+    const ge::DataType kDtype = context->GetInputDesc(0)->GetDataType();
+    if ((kDtype != ge::DT_FLOAT16 && kDtype != ge::DT_BF16) || context->GetInputDesc(1)->GetDataType() != ge::DT_FLOAT ||
         context->GetInputDesc(2)->GetDataType() != ge::DT_FLOAT) {
         return ge::GRAPH_FAILED;
     }
@@ -201,13 +217,13 @@ ge::graphStatus TilingFunc(gert::TilingContext *context)
     tiling.set_usedAivNum(usedAivNum);
     tiling.set_btAlign(AlignUp(bt, kFp32BlockElems));
     tiling.set_scoreWorkspaceBytes(scoreBytes);
-    if (BuildCubeTiling(bt, k, tiling) != ge::GRAPH_SUCCESS) {
+    if (BuildCubeTiling(bt, k, kDtype, tiling) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-    context->SetTilingKey(ChunkKey(bt));
+    context->SetTilingKey(TilingKey(kDtype, bt));
     context->SetBlockDim(blockDim);
     context->SetScheduleMode(1);
 
