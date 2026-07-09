@@ -515,6 +515,36 @@ def test_kda_gate_cumsum_safe_gate_matches_reference():
     _assert_close("gate cumsum safe", got, ref, rtol=2e-3, atol=2e-3)
 
 
+def test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference():
+    device = _device()
+    if device.type == "cpu":
+        return
+    torch.manual_seed(20260707)
+    chunk_size = 64
+    raw = torch.randn(1, 1536, 2, 128, device=device, dtype=torch.bfloat16)
+    a_log = torch.log(torch.empty(2, device=device, dtype=torch.float32).uniform_(1, 16))
+    dt_bias = torch.randn(2 * 128, device=device, dtype=torch.float32)
+    got = torch.ops.npu.npu_kda_gate_cumsum(
+        raw,
+        chunk_size,
+        A_log=a_log,
+        dt_bias=dt_bias,
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+    )
+    ref = _kda_gate_cumsum_reference(
+        raw.detach().cpu(),
+        chunk_size,
+        A_log=a_log.detach().cpu(),
+        dt_bias=dt_bias.detach().cpu(),
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+    )
+    _assert_close("gate cumsum safe multitask", got, ref, rtol=2e-3, atol=2e-3)
+
+
 if __name__ == "__main__":
     test_chunk_kda_fwd_matches_reference()
     test_chunk_kda_fwd_chunk128_v128_gva_varlen()
@@ -526,3 +556,4 @@ if __name__ == "__main__":
     test_kda_gate_cumsum_bnsd_direct_matches_reference()
     test_kda_gate_cumsum_ntd_direct_matches_reference()
     test_kda_gate_cumsum_safe_gate_matches_reference()
+    test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference()

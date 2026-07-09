@@ -16,6 +16,7 @@ constexpr uint32_t GATE_V_MTE3_EVENT_ID = 1;
 constexpr uint32_t GATE_MTE3_MTE2_EVENT_ID = 2;
 constexpr uint32_t GATE_SCALAR_MTE2_V_EVENT_ID = 3;
 constexpr uint32_t GATE_SCALAR_V_S_EVENT_ID = 4;
+constexpr uint32_t GATE_MTE3_V_EVENT_ID = 5;
 constexpr uint32_t GATE_ROW_ELEMENTS = 256;
 
 template <typename T>
@@ -246,6 +247,8 @@ private:
             CopyFloatVectorOut(gk_, Offset(b, t, hv, 0), acc, k_);
             SetFlag<HardEvent::MTE3_MTE2>(GATE_MTE3_MTE2_EVENT_ID);
             WaitFlag<HardEvent::MTE3_MTE2>(GATE_MTE3_MTE2_EVENT_ID);
+            SetFlag<HardEvent::MTE3_V>(GATE_MTE3_V_EVENT_ID);
+            WaitFlag<HardEvent::MTE3_V>(GATE_MTE3_V_EVENT_ID);
         }
         (void)safeGate_;
     }
