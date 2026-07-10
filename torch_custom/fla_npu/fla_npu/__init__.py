@@ -7,6 +7,8 @@ import pathlib
 
 _PACKAGE_DIR = pathlib.Path(__file__).resolve().parent
 _DEFAULT_VENDOR_DIR = "fla_npu_transformer"
+_LEGACY_TORCH_OPS_LOADED = False
+_LEGACY_TORCH_OPS_LIBRARY: pathlib.Path | None = None
 
 
 def _prepend_env_path(name: str, value: pathlib.Path) -> None:
@@ -65,7 +67,7 @@ def _prepare_embedded_opp() -> pathlib.Path:
     if not (os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_OPP_PATH")):
         raise RuntimeError(
             "CANN environment is not initialized. Please source the CANN set_env.sh "
-            "before importing fla_npu."
+            "before calling fla_npu.load_legacy_torch_ops()."
         )
 
     vendor_dir = _resolve_vendor_dir()
@@ -109,8 +111,19 @@ def _preload_torch_npu_dependencies(torch_module, torch_npu_module) -> None:
         _preload_library(lib_path)
 
 
-# Load the custom operator library
-def _load_opextension_so():
+def load_legacy_torch_ops() -> pathlib.Path:
+    """Load the legacy PyTorch dispatcher custom ops.
+
+    ``import fla_npu`` is intentionally lightweight and does not import torch,
+    torch_npu, or register ``torch.ops.npu`` kernels.  Call this function only
+    when old call sites such as ``torch.ops.npu.npu_chunk_fwd_o(...)`` must keep
+    working during the migration to the decoupled ``fla_npu.ops.ascendc`` API.
+    """
+
+    global _LEGACY_TORCH_OPS_LOADED, _LEGACY_TORCH_OPS_LIBRARY
+    if _LEGACY_TORCH_OPS_LOADED and _LEGACY_TORCH_OPS_LIBRARY is not None:
+        return _LEGACY_TORCH_OPS_LIBRARY
+
     _prepare_embedded_opp()
 
     import torch
@@ -124,10 +137,19 @@ def _load_opextension_so():
     if not so_files:
         raise FileNotFoundError(f"not find custom_aclnn_extension_lib*.so in {so_dir}")
 
-    atb_so_path = str(so_files[0])
-    torch.ops.load_library(atb_so_path)
-    from .ops.ascendc import install_torch_npu_ops_compat
+    legacy_library = so_files[0].resolve()
+    torch.ops.load_library(str(legacy_library))
+    from .ops.ascendc import install_legacy_torch_ops_warning, install_torch_npu_ops_compat
 
     install_torch_npu_ops_compat()
+    install_legacy_torch_ops_warning()
+    _LEGACY_TORCH_OPS_LOADED = True
+    _LEGACY_TORCH_OPS_LIBRARY = legacy_library
+    return legacy_library
 
-_load_opextension_so()
+
+def is_legacy_torch_ops_loaded() -> bool:
+    return _LEGACY_TORCH_OPS_LOADED
+
+
+__all__ = ["is_legacy_torch_ops_loaded", "load_legacy_torch_ops"]

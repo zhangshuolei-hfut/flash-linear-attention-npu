@@ -70,6 +70,7 @@ def main() -> int:
     args = parser.parse_args()
 
     import fla_npu
+    fla_npu.load_legacy_torch_ops()
     import torch_npu
     from fla_npu.ops import ascendc
 

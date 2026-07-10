@@ -1,14 +1,14 @@
 """Ascend C backed FLA NPU operators.
 
-The raw custom operators are registered under ``torch.ops.npu`` by
-``import fla_npu``.  This module provides stable Python import paths and a
-compatibility shim for older ``torch_npu.ops`` call sites.
+This module provides stable Python import paths and compatibility helpers for
+the legacy PyTorch dispatcher custom operators.
 """
 
 from __future__ import annotations
 
 import functools
 import types
+import warnings
 from typing import Callable
 
 _ASCENDC_OPS = (
@@ -34,6 +34,13 @@ BACKWARD_OPS = {
     "npu_causal_conv1d": "npu_causal_conv1d_bwd",
 }
 
+_LEGACY_TORCH_OPS_WARNING = (
+    "torch.ops.npu.{name} is a legacy FLA NPU compatibility API. This call path "
+    "depends on the PyTorch/torch_npu dispatcher ABI and will not be supported "
+    "in a future fla_npu release. Use fla_npu.ops.ascendc.{public_name}(...) "
+    "or the decoupled Ascend C API instead."
+)
+
 
 def _torch_npu_namespace():
     import torch
@@ -41,14 +48,83 @@ def _torch_npu_namespace():
     return torch.ops.npu
 
 
+def _ensure_legacy_torch_ops_loaded() -> None:
+    import fla_npu
+
+    is_loaded = getattr(fla_npu, "is_legacy_torch_ops_loaded", lambda: False)
+    if not is_loaded():
+        fla_npu.load_legacy_torch_ops()
+
+
 def _get_torch_op(name: str):
     namespace = _torch_npu_namespace()
     if not hasattr(namespace, name):
+        _ensure_legacy_torch_ops_loaded()
+        namespace = _torch_npu_namespace()
+    if not hasattr(namespace, name):
         raise AttributeError(
-            f"torch.ops.npu.{name} is not registered. Import fla_npu first and "
-            "make sure the custom extension loaded successfully."
+            f"torch.ops.npu.{name} is not registered. Call "
+            "fla_npu.load_legacy_torch_ops() first if you need the legacy "
+            "torch.ops.npu compatibility path."
         )
-    return getattr(namespace, name)
+    return _unwrap_legacy_torch_op(getattr(namespace, name))
+
+
+def _warn_legacy_torch_op(name: str) -> None:
+    warnings.warn(
+        _LEGACY_TORCH_OPS_WARNING.format(
+            name=name,
+            public_name=_strip_npu_prefix(name),
+        ),
+        FutureWarning,
+        stacklevel=3,
+    )
+
+
+def _unwrap_legacy_torch_op(op):
+    return getattr(op, "_fla_npu_original_op", op)
+
+
+class _LegacyTorchOpOverloadWarningWrapper:
+    _fla_npu_legacy_warning_wrapper = True
+
+    def __init__(self, name: str, overload):
+        self._fla_npu_name = name
+        self._fla_npu_original_op = overload
+
+    def __call__(self, *args, **kwargs):
+        _warn_legacy_torch_op(self._fla_npu_name)
+        return self._fla_npu_original_op(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._fla_npu_original_op, name)
+
+    def __repr__(self) -> str:
+        return repr(self._fla_npu_original_op)
+
+
+class _LegacyTorchOpWarningWrapper:
+    _fla_npu_legacy_warning_wrapper = True
+
+    def __init__(self, name: str, op):
+        self._fla_npu_name = name
+        self._fla_npu_original_op = op
+        self.__name__ = name
+        self.__qualname__ = name
+        self.__doc__ = getattr(op, "__doc__", None)
+
+    def __call__(self, *args, **kwargs):
+        _warn_legacy_torch_op(self._fla_npu_name)
+        return self._fla_npu_original_op(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        value = getattr(self._fla_npu_original_op, name)
+        if callable(value):
+            return _LegacyTorchOpOverloadWarningWrapper(self._fla_npu_name, value)
+        return value
+
+    def __repr__(self) -> str:
+        return repr(self._fla_npu_original_op)
 
 
 def _make_raw_wrapper(name: str) -> Callable:
@@ -216,6 +292,19 @@ def install_torch_npu_ops_compat() -> None:
         setattr(ops, _strip_npu_prefix(name), globals()[_strip_npu_prefix(name)])
 
 
+def install_legacy_torch_ops_warning() -> None:
+    """Warn when users call legacy ``torch.ops.npu`` FLA NPU operators."""
+
+    namespace = _torch_npu_namespace()
+    for name in _ASCENDC_OPS:
+        if not hasattr(namespace, name):
+            continue
+        current = getattr(namespace, name)
+        if getattr(current, "_fla_npu_legacy_warning_wrapper", False):
+            continue
+        setattr(namespace, name, _LegacyTorchOpWarningWrapper(name, current))
+
+
 for _name in _ASCENDC_OPS:
     globals()[_name] = _make_raw_wrapper(_name)
     globals()[_strip_npu_prefix(_name)] = globals()[_name]
@@ -225,6 +314,7 @@ globals()["causal_conv1d"] = causal_conv1d
 
 __all__ = [
     "BACKWARD_OPS",
+    "install_legacy_torch_ops_warning",
     "install_torch_npu_ops_compat",
     *sorted(set(_ASCENDC_OPS)),
     *sorted({_strip_npu_prefix(name) for name in _ASCENDC_OPS}),
