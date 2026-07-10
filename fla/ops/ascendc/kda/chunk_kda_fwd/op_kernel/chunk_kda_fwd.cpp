@@ -842,6 +842,12 @@ private:
         constexpr uint64_t bytesPerElem = 5 * sizeof(float) + 3 * sizeof(T);
         uint64_t maxElems = arenaBytes / bytesPerElem;
         uint64_t maxRows = maxElems / K_;
+        // Keep the multi-row SIMD tile below the 192 KiB per-core UB budget.
+        // K=128 uses five FP32 work planes plus three typed planes; 32 rows
+        // leaves headroom for alignment and the surrounding pipeline buffers.
+        if (K_ >= 128 && maxRows > 32) {
+            maxRows = 32;
+        }
         if (maxRows == 0) {
             return false;
         }
