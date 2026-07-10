@@ -42,6 +42,49 @@ int64_t GetKdaSeqNum(int64_t batch, at::OptionalIntArrayRef cu_seqlens)
     return static_cast<int64_t>(cu.size()) - 1;
 }
 
+void CheckKdaCuSeqlens(at::OptionalIntArrayRef cu_seqlens, int64_t total_tokens, const char *op_name)
+{
+    if (!cu_seqlens.has_value()) {
+        return;
+    }
+    auto cu = cu_seqlens.value();
+    TORCH_CHECK(cu.size() >= 2, op_name, ": cu_seqlens must contain at least [0, total_tokens].");
+    TORCH_CHECK(cu[0] == 0, op_name, ": cu_seqlens[0] must be 0, but got ", cu[0], ".");
+    TORCH_CHECK(cu[cu.size() - 1] == total_tokens,
+                op_name,
+                ": cu_seqlens[-1] must equal sequence length ",
+                total_tokens,
+                ", but got ",
+                cu[cu.size() - 1],
+                ".");
+    for (size_t i = 0; i + 1 < cu.size(); ++i) {
+        TORCH_CHECK(cu[i] <= cu[i + 1],
+                    op_name,
+                    ": cu_seqlens must be nondecreasing, but cu_seqlens[",
+                    i,
+                    "]=",
+                    cu[i],
+                    " > cu_seqlens[",
+                    i + 1,
+                    "]=",
+                    cu[i + 1],
+                    ".");
+    }
+}
+
+void CheckKdaChunkIndices(at::OptionalIntArrayRef chunk_indices, const char *op_name)
+{
+    if (!chunk_indices.has_value()) {
+        return;
+    }
+    auto indices = chunk_indices.value();
+    TORCH_CHECK(indices.size() % 2 == 0,
+                op_name,
+                ": chunk_indices must contain (seq_id, chunk_id) pairs, but got ",
+                indices.size(),
+                " elements.");
+}
+
 int64_t GetKdaTotalChunks(int64_t batch, int64_t seqlen, int64_t chunk_size,
                           at::OptionalIntArrayRef cu_seqlens,
                           at::OptionalIntArrayRef chunk_indices)
@@ -474,6 +517,10 @@ npu_chunk_kda_fwd(
     int64_t K = is_rank3 ? q_sizes[2] : q_sizes[3];
     int64_t HV = is_tnd ? v_sizes[1] : (is_ntd ? v_sizes[0] : (is_bnsd ? v_sizes[1] : v_sizes[2]));
     int64_t V = is_rank3 ? v_sizes[2] : v_sizes[3];
+    CheckKdaCuSeqlens(cu_seqlens, T, "npu_chunk_kda_fwd");
+    CheckKdaChunkIndices(chunk_indices, "npu_chunk_kda_fwd");
+    TORCH_CHECK(!cu_seqlens.has_value() || is_rank3 || B == 1,
+                "npu_chunk_kda_fwd: rank4 varlen input with cu_seqlens currently requires B=1.");
     TORCH_CHECK((is_tnd && v_sizes[0] == T) || (is_ntd && v_sizes[1] == T) ||
                     (is_bsnd && v_sizes[0] == B && v_sizes[1] == T) ||
                     (is_bnsd && v_sizes[0] == B && v_sizes[2] == T),
@@ -491,9 +538,25 @@ npu_chunk_kda_fwd(
                     (is_bnsd && beta.sizes()[0] == B && beta.sizes()[1] == HV && beta.sizes()[2] == T),
                 "npu_chunk_kda_fwd: beta shape mismatch.");
     TORCH_CHECK(HV % H == 0, "npu_chunk_kda_fwd: HV must be divisible by H.");
+    int64_t seq_num = GetKdaSeqNum(B, cu_seqlens);
     if (initial_state.has_value() && initial_state->defined()) {
         TORCH_CHECK(initial_state->scalar_type() == at::kFloat,
                     "npu_chunk_kda_fwd: initial_state must be float32 when provided.");
+        TORCH_CHECK(initial_state->dim() == 4 && initial_state->size(0) == seq_num &&
+                        initial_state->size(1) == HV && initial_state->size(2) == K &&
+                        initial_state->size(3) == V,
+                    "npu_chunk_kda_fwd: initial_state must be [seq_num,Hv,K,V], where seq_num is batch "
+                    "for dense input or len(cu_seqlens)-1 for varlen input; got initial_state=",
+                    initial_state->sizes(),
+                    ", expected [",
+                    seq_num,
+                    ",",
+                    HV,
+                    ",",
+                    K,
+                    ",",
+                    V,
+                    "].");
     }
 
     std::vector<int64_t> generated_chunk_indices;
@@ -507,7 +570,6 @@ npu_chunk_kda_fwd(
         chunk_indices_for_call = c10::nullopt;
     }
 
-    int64_t seq_num = GetKdaSeqNum(B, cu_seqlens);
     int64_t total_chunks = GetKdaTotalChunks(B, T, chunk_size, cu_seqlens, chunk_indices_for_call);
     bool output_final_state_ = output_final_state.value_or(false);
     bool return_intermediate_ = return_intermediate.value_or(false);
@@ -579,9 +641,13 @@ at::Tensor npu_kda_gate_cumsum(
                 "npu_kda_gate_cumsum: g must be float32, bfloat16 or float16.");
     bool is_bnsd = g.dim() == 4 && g.sizes()[1] <= g.sizes()[2];
     bool is_ntd = g.dim() == 3 && g.sizes()[0] <= g.sizes()[1];
+    int64_t T = is_bnsd ? g.sizes()[2] : (is_ntd ? g.sizes()[1] : (g.dim() == 4 ? g.sizes()[1] : g.sizes()[0]));
     int64_t K = g.dim() == 4 ? g.sizes()[3] : g.sizes()[2];
     int64_t HV = is_bnsd ? g.sizes()[1] : (is_ntd ? g.sizes()[0] : (g.dim() == 4 ? g.sizes()[2] : g.sizes()[1]));
     TORCH_CHECK(K <= 256, "npu_kda_gate_cumsum: K must be <= 256.");
+    CheckKdaCuSeqlens(cu_seqlens, T, "npu_kda_gate_cumsum");
+    TORCH_CHECK(!cu_seqlens.has_value() || g.dim() == 3 || g.sizes()[0] == 1,
+                "npu_kda_gate_cumsum: rank4 varlen input with cu_seqlens currently requires B=1.");
 
     bool use_gate = use_gate_in_kernel.value_or(false);
     bool safe = safe_gate.value_or(false);

@@ -12,6 +12,9 @@ except Exception:  # pragma: no cover - CPU fallback for syntax/smoke only
 
 import fla_npu  # noqa: F401
 
+if torch_npu is not None:
+    fla_npu.load_legacy_torch_ops()
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -26,12 +29,12 @@ def _device():
 
 def _make_inputs(device, b=1, h=2, hv=2, t=64, kdim=32, vdim=64, dtype=torch.float32):
     torch.manual_seed(1234 + b + h + hv + t + kdim + vdim)
-    q = (torch.randn(b, t, h, kdim, device=device, dtype=dtype) * 0.08).requires_grad_(True)
-    k = (torch.randn(b, t, h, kdim, device=device, dtype=dtype) * 0.08).requires_grad_(True)
-    v = (torch.randn(b, t, hv, vdim, device=device, dtype=dtype) * 0.08).requires_grad_(True)
-    gk = (torch.randn(b, t, hv, kdim, device=device, dtype=torch.float32).cumsum(dim=1) * 0.001).requires_grad_(True)
-    beta = torch.sigmoid(torch.randn(b, t, hv, device=device, dtype=torch.float32)).requires_grad_(True)
-    initial_state = (torch.randn(b, hv, kdim, vdim, device=device, dtype=torch.float32) * 0.02).requires_grad_(True)
+    q = (torch.randn(b, t, h, kdim, dtype=dtype) * 0.08).to(device).requires_grad_(True)
+    k = (torch.randn(b, t, h, kdim, dtype=dtype) * 0.08).to(device).requires_grad_(True)
+    v = (torch.randn(b, t, hv, vdim, dtype=dtype) * 0.08).to(device).requires_grad_(True)
+    gk = (torch.randn(b, t, hv, kdim, dtype=torch.float32).cumsum(dim=1) * 0.001).to(device).requires_grad_(True)
+    beta = torch.sigmoid(torch.randn(b, t, hv, dtype=torch.float32)).to(device).requires_grad_(True)
+    initial_state = (torch.randn(b, hv, kdim, vdim, dtype=torch.float32) * 0.02).to(device).requires_grad_(True)
     return q, k, v, gk, beta, initial_state
 
 
@@ -150,6 +153,32 @@ def test_chunk_kda_fwd_chunk128_v128_gva_varlen():
     _assert_close("final_state chunk128 v128 gva varlen", got[1], ref.final_state, rtol=3e-3, atol=3e-3)
     _assert_close("g chunk128 v128 gva varlen", got[2], gk)
     assert got[11].numel() == 0
+
+
+def test_chunk_kda_fwd_varlen_initial_state_shape_rejected():
+    device = _device()
+    if device.type == "cpu":
+        return
+    q, k, v, gk, beta, bad_initial_state = _make_inputs(device, h=1, hv=2, t=16, kdim=8, vdim=32)
+    scale = q.shape[-1] ** -0.5
+    cu_seqlens = [0, 6, 16]
+    try:
+        torch.ops.npu.npu_chunk_kda_fwd(
+            q,
+            k,
+            v,
+            gk,
+            beta,
+            scale,
+            64,
+            initial_state=bad_initial_state,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+        )
+    except RuntimeError as exc:
+        assert "initial_state must be [seq_num,Hv,K,V]" in str(exc)
+    else:
+        raise AssertionError("varlen initial_state with mismatched seq_num should be rejected")
 
 
 def test_chunk_kda_fwd_bf16_chunk32_matches_reference():
@@ -427,7 +456,7 @@ def test_kda_gate_cumsum_default_and_fwd_integration():
     q, k, v, _, beta, initial_state = _make_inputs(
         device, h=1, hv=2, t=40, kdim=8, vdim=16, dtype=torch.float16
     )
-    g_step = (torch.randn(1, 40, 2, 8, device=device, dtype=torch.bfloat16) * 0.001)
+    g_step = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.001).to(device)
     gk = torch.ops.npu.npu_kda_gate_cumsum(g_step, 32)
     ref_gk = _kda_gate_cumsum_reference(g_step.detach().cpu(), 32)
     _assert_close("gate cumsum default", gk, ref_gk, rtol=2e-3, atol=2e-3)
@@ -467,7 +496,7 @@ def test_kda_gate_cumsum_bnsd_direct_matches_reference():
     if device.type == "cpu":
         return
     torch.manual_seed(6789)
-    g_bsnd = (torch.randn(1, 40, 2, 8, device=device, dtype=torch.bfloat16) * 0.001)
+    g_bsnd = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.001).to(device)
     g_bnsd = g_bsnd.permute(0, 2, 1, 3).contiguous()
     got = torch.ops.npu.npu_kda_gate_cumsum(g_bnsd, 32)
     ref = _kda_gate_cumsum_reference(g_bsnd.detach().cpu(), 32).permute(0, 2, 1, 3)
@@ -479,7 +508,7 @@ def test_kda_gate_cumsum_ntd_direct_matches_reference():
     if device.type == "cpu":
         return
     torch.manual_seed(7890)
-    g_bsnd = (torch.randn(1, 40, 2, 8, device=device, dtype=torch.bfloat16) * 0.001)
+    g_bsnd = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.001).to(device)
     g_ntd = g_bsnd.squeeze(0).permute(1, 0, 2).contiguous()
     got = torch.ops.npu.npu_kda_gate_cumsum(g_ntd, 32)
     ref = _kda_gate_cumsum_reference(g_bsnd.squeeze(0).detach().cpu(), 32).permute(1, 0, 2)
@@ -491,9 +520,9 @@ def test_kda_gate_cumsum_safe_gate_matches_reference():
     if device.type == "cpu":
         return
     torch.manual_seed(5678)
-    raw = (torch.randn(1, 40, 2, 8, device=device, dtype=torch.bfloat16) * 0.5)
-    a_log = torch.randn(2, device=device, dtype=torch.float32) * 0.1
-    dt_bias = torch.randn(2, 8, device=device, dtype=torch.float32) * 0.1
+    raw = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.5).to(device)
+    a_log = (torch.randn(2, dtype=torch.float32) * 0.1).to(device)
+    dt_bias = (torch.randn(2, 8, dtype=torch.float32) * 0.1).to(device)
     got = torch.ops.npu.npu_kda_gate_cumsum(
         raw,
         32,
@@ -521,9 +550,9 @@ def test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference():
         return
     torch.manual_seed(20260707)
     chunk_size = 64
-    raw = torch.randn(1, 1536, 2, 128, device=device, dtype=torch.bfloat16)
-    a_log = torch.log(torch.empty(2, device=device, dtype=torch.float32).uniform_(1, 16))
-    dt_bias = torch.randn(2 * 128, device=device, dtype=torch.float32)
+    raw = torch.randn(1, 1536, 2, 128, dtype=torch.bfloat16).to(device)
+    a_log = torch.log(torch.empty(2, dtype=torch.float32).uniform_(1, 16)).to(device)
+    dt_bias = torch.randn(2 * 128, dtype=torch.float32).to(device)
     got = torch.ops.npu.npu_kda_gate_cumsum(
         raw,
         chunk_size,
@@ -548,6 +577,7 @@ def test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference():
 if __name__ == "__main__":
     test_chunk_kda_fwd_matches_reference()
     test_chunk_kda_fwd_chunk128_v128_gva_varlen()
+    test_chunk_kda_fwd_varlen_initial_state_shape_rejected()
     test_chunk_kda_fwd_bf16_chunk32_matches_reference()
     test_chunk_kda_fwd_bf16_gate_matches_reference()
     test_chunk_kda_fwd_fp16_matches_reference()

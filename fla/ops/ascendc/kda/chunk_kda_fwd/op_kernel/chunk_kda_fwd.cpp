@@ -2357,7 +2357,6 @@ private:
             ComputePostKgWUVec(b, h, hv, chunkIdx, start, curT);
             return;
         }
-
         bool usePostWuCube = UsePostWuCube(curT);
         bool useAkkCubeSolve = UseAkkCubeSolve(curT);
         uint64_t solveRowBegin = 0;

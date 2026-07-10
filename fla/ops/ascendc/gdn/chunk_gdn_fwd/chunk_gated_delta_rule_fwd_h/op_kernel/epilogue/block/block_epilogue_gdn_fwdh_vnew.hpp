@@ -213,6 +213,7 @@ public:
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState,
+        bool waitWsFromMte3,
         bool isPing
     )
     {
@@ -235,7 +236,6 @@ public:
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
             return;
         }
-
         AscendC::ResetMask();
 
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
@@ -271,7 +271,7 @@ public:
             PrepareG(gUbTensor, gLastUbTensor, gInputUbTensor, gInputThisSubBlock, mActual, pingpongFlag);
             Arch::CrossCoreWaitFlag(cube1Done);
 
-            if (storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value) {
+            if (waitWsFromMte3) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
@@ -399,7 +399,7 @@ public:
         PrepareG(gUbTensor, gLastUbTensor, gInputUbTensor, gInputThisSubBlock, mActual, pingpongFlag);
         Arch::CrossCoreWaitFlag(cube1Done);
 
-        bool waitWsFromMte3 = storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value;
+        bool waitWsThisTileFromMte3 = waitWsFromMte3;
         for (uint32_t rowStart = rowBegin; rowStart < rowEnd;) {
             uint32_t alignExtra = rowStart & 7;
             uint32_t maxRowsThisTile = ROW_TILE - alignExtra;
@@ -424,7 +424,7 @@ public:
             AscendC::Cast(calcUbTensor, uUbTensor, AscendC::RoundMode::CAST_NONE, rowsThisTile * nvActual);
             AscendC::PipeBarrier<PIPE_V>();
 
-            if (waitWsFromMte3) {
+            if (waitWsThisTileFromMte3) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
@@ -432,7 +432,7 @@ public:
             AscendC::DataCopy(wsUbTensor, wsInputThisTile, rowsThisTile * nvActual);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
-            waitWsFromMte3 = false;
+            waitWsThisTileFromMte3 = false;
 
             AscendC::Sub<float>(wsUbTensor, calcUbTensor, wsUbTensor, rowsThisTile * nvActual);
             AscendC::PipeBarrier<PIPE_V>();

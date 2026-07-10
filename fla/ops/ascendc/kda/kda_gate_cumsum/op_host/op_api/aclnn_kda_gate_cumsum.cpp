@@ -77,6 +77,36 @@ KdaGateLayout InferKdaGateLayout(const aclTensor *g)
     return KdaGateDim(g, 0) <= KdaGateDim(g, 1) ? KdaGateLayout::NTD : KdaGateLayout::TND;
 }
 
+int64_t KdaGateSeqLen(const aclTensor *g)
+{
+    KdaGateLayout layout = InferKdaGateLayout(g);
+    if (layout == KdaGateLayout::TND) {
+        return KdaGateDim(g, 0);
+    }
+    if (layout == KdaGateLayout::NTD) {
+        return KdaGateDim(g, 1);
+    }
+    return layout == KdaGateLayout::BNSD ? KdaGateDim(g, 2) : KdaGateDim(g, 1);
+}
+
+aclnnStatus KdaGateCheckCuSeqlens(const aclIntArray *cuSeqlensOptional, int64_t seqlen)
+{
+    if (cuSeqlensOptional == nullptr) {
+        return ACLNN_SUCCESS;
+    }
+    const aclIntArray &cu = *cuSeqlensOptional;
+    CHECK_COND(cu.Size() >= 2, ACLNN_ERR_PARAM_INVALID,
+               "cuSeqlensOptional must contain at least [0, total_tokens].");
+    CHECK_COND(cu[0] == 0, ACLNN_ERR_PARAM_INVALID, "cuSeqlensOptional[0] must be 0.");
+    CHECK_COND(cu[cu.Size() - 1] == seqlen, ACLNN_ERR_PARAM_INVALID,
+               "cuSeqlensOptional last element must equal the sequence length.");
+    for (size_t idx = 0; idx + 1 < cu.Size(); ++idx) {
+        CHECK_COND(cu[idx] <= cu[idx + 1], ACLNN_ERR_PARAM_INVALID,
+                   "cuSeqlensOptional must be nondecreasing.");
+    }
+    return ACLNN_SUCCESS;
+}
+
 aclnnStatus KdaGateCheckParams(
     const aclTensor *g,
     const aclTensor *aLogOptional,
@@ -101,7 +131,11 @@ aclnnStatus KdaGateCheckParams(
     CHECK_COND(gkOut->GetDataType() == DataType::DT_FLOAT, ACLNN_ERR_PARAM_INVALID,
                "gkOut must be float32.");
     CHECK_COND(KdaGateSameShape(gkOut, g), ACLNN_ERR_PARAM_INVALID, "gkOut shape must match g shape.");
+    CHECK_RET(KdaGateCheckCuSeqlens(cuSeqlensOptional, KdaGateSeqLen(g)) == ACLNN_SUCCESS,
+              ACLNN_ERR_PARAM_INVALID);
     KdaGateLayout layout = InferKdaGateLayout(g);
+    CHECK_COND(cuSeqlensOptional == nullptr || rank == 3 || KdaGateDim(g, 0) == 1, ACLNN_ERR_PARAM_INVALID,
+               "rank4 varlen input with cuSeqlensOptional currently requires B=1.");
     int64_t hv = (layout == KdaGateLayout::BNSD) ? KdaGateDim(g, 1) :
                  ((layout == KdaGateLayout::NTD) ? KdaGateDim(g, 0) :
                   ((rank == 4) ? KdaGateDim(g, 2) : KdaGateDim(g, 1)));
@@ -126,7 +160,6 @@ aclnnStatus KdaGateCheckParams(
         CHECK_COND(!safeGate, ACLNN_ERR_PARAM_INVALID,
                    "safeGate only takes effect when useGateInKernel is true.");
     }
-    (void)cuSeqlensOptional;
     return ACLNN_SUCCESS;
 }
 } // namespace
