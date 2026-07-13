@@ -68,15 +68,15 @@ FLA_NPU_SOC=ascend910b FLA_NPU_INCREMENTAL_BUILD=1 python -m pip wheel --no-buil
 
 布尔变量设为 `TRUE` 时也接受 `1`、`YES`、`ON`；未设置或其他值按 `FALSE` 处理。
 
-#### 方式 B：【备选】编译自定义算子包 + torch_custom 框架
+#### 方式 B：【备选】单独编译算子 run 包和 Python wheel
 
-只有在需要分开调试 OPP run 包和 torch 适配 wheel 时，才建议使用该方式。release wheel 和普通安装优先使用方式 A。
+只有在已经安装方式 A 的完整 wheel、但需要快速替换少量算子的 Ascend C 产物时，才建议使用该方式。run 包安装时会把当前 run 包里的 `packages/vendors/fla_npu_transformer` 合并覆盖到当前 Python 环境已安装的 `site-packages/fla_npu/opp/vendors/fla_npu_transformer`，从而更新 `aclnn`、tiling、kernel 和相关配置。
 
 ```sh
-# 编译 GDN 算子 run 包，注意 --soc 需指定为当前机器芯片类型 {ascend910b/ascend910_93/ascend950}
-bash build.sh --soc=ascend910b --pkg --vendor_name=fla_npu
+# 编译一个或多个算子 run 包，--soc 需指定为当前机器芯片类型 {ascend910b/ascend910_93/ascend950}
+bash build.sh --soc=ascend910b --pkg --vendor_name=fla_npu --ops=chunk_fwd_o
 
-# 单独编译 Python runtime wheel
+# 如果 Python wrapper 也有修改，再单独编译 Python runtime wheel
 cd torch_custom/fla_npu
 python3 setup.py bdist_wheel
 
@@ -99,14 +99,19 @@ python -m pip install --force-reinstall --no-deps dist/flash_linear_attention_np
 
 #### 方式 B 产物安装
 
-先安装 run 包，再安装 torch_custom wheel。运行 Python 前需要 source custom OPP 的 `set_env.bash`，或设置 `FLA_NPU_OPP_PATH` 指向 OPP root / vendor 目录。
+先确认方式 A 的完整 wheel 已经安装到当前 Python 环境，然后安装 run 包。安装器会在覆盖前列出 `op_api/include/aclnnop` 中新增、删除、修改的 aclnn ABI 头文件；删除只按当前 run 包携带的算子范围判断，非 `--quiet` 模式需要确认后才继续。
 
 ```sh
-export FLA_NPU_OPP_INSTALL_PATH=/path/to/fla_npu_opp
-./build_out/fla-npu-*.run --quiet --install-path=${FLA_NPU_OPP_INSTALL_PATH}
-source ${FLA_NPU_OPP_INSTALL_PATH}/vendors/fla_npu_transformer/bin/set_env.bash
+# 覆盖当前 Python 环境中 flash-linear-attention-npu wheel 内嵌的 OPP
+./build_out/fla-npu-*.run --install
+# 或等价写法
+./build_out/fla-npu-*.run --full
+
+# 如果 Python wrapper 也有修改，再安装单独编译出的 wheel
 python -m pip install --force-reinstall --no-deps torch_custom/fla_npu/dist/fla_npu-*.whl
 ```
+
+安装 run 包后需要重启 Python 进程，已经 `dlopen` 的 `libcust_opapi.so` 不会在同一进程内热替换。
 
 `import fla_npu` 是轻量导入，不会自动导入 `torch` / `torch_npu`，也不会自动注册 `torch.ops.npu`。默认 wheel 通过 Python ctypes 直调 aclnn/opapi，推荐使用 `fla_npu.ops.ascendc`；`torch_npu.ops.*` 会在导入 `fla_npu.ops.ascendc` 后挂到同一套 Python wrapper。只有用 `FLA_NPU_BUILD_LEGACY_EXTENSION=1` 额外编出 legacy 扩展时，才可显式调用 `fla_npu.load_legacy_torch_ops()` 兼容旧 `torch.ops.npu.*`。
 

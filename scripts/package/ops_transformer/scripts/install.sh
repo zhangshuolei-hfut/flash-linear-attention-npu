@@ -330,7 +330,7 @@ get_opts() {
   while true; do
     # skip 2 parameters avoid run pkg and directory as input parameter
     case "$1" in
-      --full)
+      --full|--install)
         IN_INSTALL_TYPE=$(echo ${1} | awk -F"--" '{print $2}')
         IS_INSTALL="y"
         CONFLICT_CMD_NUMS=$(expr $CONFLICT_CMD_NUMS + 1)
@@ -379,11 +379,288 @@ get_opts() {
 check_opts() {
   if [ "${CONFLICT_CMD_NUMS}" != 1 ]; then
     echo "[OpsTransformer] [ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:\
- only support one type: full/run/devel/upgrade/uninstall/check, operation execute failed!\
+ only support one type: install/full/upgrade/uninstall, operation execute failed!\
  Please use [--help] to see the usage."
     exitlog
     exit 1
   fi
+}
+
+get_python_bin() {
+  local candidate
+  for candidate in python python3; do
+    if command -v "${candidate}" >/dev/null 2>&1 && "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+      command -v "${candidate}"
+      return
+    fi
+  done
+  echo ""
+}
+
+get_wheel_opp_root() {
+  local python_bin
+  python_bin=$(get_python_bin)
+  if [ -z "${python_bin}" ]; then
+    logandprint "[ERROR]: python is required to locate the installed fla_npu wheel OPP."
+    exitlog
+    exit 1
+  fi
+
+  "${python_bin}" - <<'PY'
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.find_spec("fla_npu")
+if spec is None or spec.origin is None:
+    raise SystemExit("fla_npu is not importable. Install flash-linear-attention-npu wheel first.")
+
+package_dir = Path(spec.origin).resolve().parent
+print(package_dir / "opp")
+PY
+}
+
+copy_wheel_file() {
+  local src_file="$1"
+  local dst_file="$2"
+  mkdir -p "$(dirname "${dst_file}")"
+  cp -a "${src_file}" "${dst_file}"
+}
+
+to_snake_name() {
+  echo "$1" | sed -E 's/([A-Z]+)([A-Z][a-z])/\1_\2/g; s/([a-z0-9])([A-Z])/\1_\2/g' | tr '[:upper:]' '[:lower:]'
+}
+
+collect_source_op_names() {
+  local src_vendor="$1"
+  local src_abi_dir="${src_vendor}/op_api/include/aclnnop"
+  local src_kernel_root="${src_vendor}/op_impl/ai_core/tbe/kernel"
+
+  (
+    if [ -d "${src_abi_dir}" ]; then
+      while IFS= read -r src_file; do
+        local file_name
+        file_name=$(basename "${src_file}")
+        case "${file_name}" in
+          aclnn_ops_transformer*.h)
+            continue
+            ;;
+          aclnn_*.h)
+            echo "${file_name}" | sed -E 's/^aclnn_(.*)\.h$/\1/'
+            ;;
+        esac
+      done < <(find "${src_abi_dir}" -type f -name 'aclnn_*.h' | sort)
+    fi
+
+    if [ -d "${src_kernel_root}" ]; then
+      while IFS= read -r src_op_dir; do
+        to_snake_name "$(basename "${src_op_dir}")"
+      done < <(find "${src_kernel_root}" -mindepth 2 -maxdepth 2 -type d | sort)
+    fi
+  ) | sort -u
+}
+
+remove_deleted_aclnn_headers() {
+  local src_vendor="$1"
+  local dst_vendor="$2"
+  local src_abi_dir="${src_vendor}/op_api/include/aclnnop"
+  local dst_abi_dir="${dst_vendor}/op_api/include/aclnnop"
+  local op_name
+  local rel_file
+
+  if [ ! -d "${src_abi_dir}" ] || [ ! -d "${dst_abi_dir}" ]; then
+    return
+  fi
+
+  # Only delete aclnn headers for operators carried by this run package. A
+  # partial run package intentionally omits unrelated operators, so treating all
+  # target-only headers as deleted would break incremental replacement.
+  while IFS= read -r op_name; do
+    for rel_file in "aclnn_${op_name}.h" "level2/aclnn_${op_name}.h"; do
+      if [ -f "${dst_abi_dir}/${rel_file}" ] && [ ! -f "${src_abi_dir}/${rel_file}" ]; then
+        rm -f "${dst_abi_dir}/${rel_file}"
+      fi
+    done
+  done < <(collect_source_op_names "${src_vendor}")
+}
+
+merge_vendor_to_wheel_opp() {
+  local src_vendor="$1"
+  local dst_vendor="$2"
+
+  if [ ! -d "${src_vendor}" ]; then
+    logandprint "[ERROR]: Source vendor directory not found: ${src_vendor}"
+    exitlog
+    exit 1
+  fi
+
+  mkdir -p "${dst_vendor}"
+
+  # A partial run package is expected to replace only the operators it carries.
+  # Remove matching per-operator kernel directories first so stale .o files from
+  # an older build cannot survive when a kernel filename changes.
+  local src_kernel_root="${src_vendor}/op_impl/ai_core/tbe/kernel"
+  local dst_kernel_root="${dst_vendor}/op_impl/ai_core/tbe/kernel"
+  if [ -d "${src_kernel_root}" ]; then
+    while IFS= read -r src_op_dir; do
+      local rel_dir="${src_op_dir#${src_kernel_root}/}"
+      local dst_op_dir="${dst_kernel_root}/${rel_dir}"
+      if [ -d "${dst_op_dir}" ]; then
+        rm -rf "${dst_op_dir}"
+      fi
+    done < <(find "${src_kernel_root}" -mindepth 2 -maxdepth 2 -type d)
+  fi
+
+  remove_deleted_aclnn_headers "${src_vendor}" "${dst_vendor}"
+
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --checksum "${src_vendor}/" "${dst_vendor}/"
+  else
+    cp -a "${src_vendor}/." "${dst_vendor}/"
+  fi
+
+  if [ -f "${dst_vendor}/op_api/lib/libcust_opapi.so" ]; then
+    copy_wheel_file "${dst_vendor}/op_api/lib/libcust_opapi.so" "${dst_vendor}/op_api/lib/libopapi.so"
+  fi
+
+  mkdir -p "${dst_vendor}/bin"
+  cat >"${dst_vendor}/bin/set_env.bash" <<'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENDOR_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+OPP_ROOT="$(cd "${VENDOR_DIR}/../.." && pwd)"
+export ASCEND_CUSTOM_OPP_PATH="${OPP_ROOT}:${VENDOR_DIR}:${ASCEND_CUSTOM_OPP_PATH}"
+export LD_LIBRARY_PATH="${VENDOR_DIR}/op_api/lib:${LD_LIBRARY_PATH}"
+EOF
+  chmod 755 "${dst_vendor}/bin/set_env.bash" 2>/dev/null
+}
+
+update_wheel_vendors_config() {
+  local vendors_root="$1"
+  local vendor_name="$2"
+  local config_file="${vendors_root}/config.ini"
+  mkdir -p "${vendors_root}"
+
+  local existing=""
+  if [ -f "${config_file}" ]; then
+    existing=$(grep -w "load_priority" "${config_file}" | tail -n 1 | cut --only-delimited -d"=" -f2-)
+  fi
+
+  local merged="${vendor_name}"
+  local item
+  IFS=',' read -ra vendor_items <<< "${existing}"
+  for item in "${vendor_items[@]}"; do
+    item=$(echo "${item}" | xargs)
+    if [ -n "${item}" ] && [ "${item}" != "${vendor_name}" ]; then
+      merged="${merged},${item}"
+    fi
+  done
+  echo "load_priority=${merged}" >"${config_file}"
+}
+
+confirm_aclnn_abi_changes() {
+  local src_vendor="$1"
+  local dst_vendor="$2"
+  local src_abi_dir="${src_vendor}/op_api/include/aclnnop"
+  local dst_abi_dir="${dst_vendor}/op_api/include/aclnnop"
+  local report_file
+
+  if [ ! -d "${src_abi_dir}" ]; then
+    logandprint "[INFO]: No aclnn ABI headers found in run package, skip ABI comparison."
+    return
+  fi
+
+  report_file=$(mktemp)
+
+  while IFS= read -r src_file; do
+    local rel_file="${src_file#${src_abi_dir}/}"
+    local dst_file="${dst_abi_dir}/${rel_file}"
+    if [ ! -f "${dst_file}" ]; then
+      echo "ADDED    ${rel_file}" >>"${report_file}"
+    elif ! cmp -s "${src_file}" "${dst_file}"; then
+      echo "MODIFIED ${rel_file}" >>"${report_file}"
+    fi
+  done < <(find "${src_abi_dir}" -type f | sort)
+
+  while IFS= read -r op_name; do
+    for rel_file in "aclnn_${op_name}.h" "level2/aclnn_${op_name}.h"; do
+      if [ -f "${dst_abi_dir}/${rel_file}" ] && [ ! -f "${src_abi_dir}/${rel_file}" ]; then
+        echo "DELETED  ${rel_file}" >>"${report_file}"
+      fi
+    done
+  done < <(collect_source_op_names "${src_vendor}")
+
+  if [ ! -s "${report_file}" ]; then
+    logandprint "[INFO]: No aclnn ABI header changes detected."
+    rm -f "${report_file}"
+    return
+  fi
+
+  logandprint "[WARNING]: aclnn ABI header changes detected before installing this run package:"
+  while IFS= read -r line; do
+    logandprint "[WARNING]:   ${line}"
+  done <"${report_file}"
+  rm -f "${report_file}"
+
+  if [ "${IS_QUIET}" = "y" ]; then
+    logandprint "[WARNING]: --quiet is set, treating aclnn ABI changes as confirmed."
+    return
+  fi
+
+  logandprint "[INFO]: Continue to overwrite the installed wheel OPP? [y/n]"
+  while true; do
+    read yn
+    if [ "${yn}" = "y" ]; then
+      return
+    elif [ "${yn}" = "n" ]; then
+      logandprint "[INFO]: Exit without installing run package."
+      exitlog
+      exit 0
+    else
+      echo "[WARNING]: Input error, please input y or n to choose!"
+    fi
+  done
+}
+
+install_wheel_opp_package() {
+  if [ "${IS_INSTALL}" = "n" ]; then
+    return
+  fi
+
+  local src_vendors_root="${CURR_PATH}/../../../../ops_transformer/packages/vendors"
+  local src_vendor="${src_vendors_root}/fla_npu_transformer"
+  if [ ! -d "${src_vendor}" ]; then
+    logandprint "[ERROR]: The run package does not contain ${src_vendor}."
+    exitlog
+    exit 1
+  fi
+
+  local wheel_opp_root
+  wheel_opp_root=$(get_wheel_opp_root)
+  wheel_opp_root="${wheel_opp_root%/}"
+  if [ -z "${wheel_opp_root}" ]; then
+    logandprint "[ERROR]: Unable to locate wheel OPP root."
+    exitlog
+    exit 1
+  fi
+
+  local dst_vendor="${wheel_opp_root}/vendors/fla_npu_transformer"
+  if [ ! -d "${dst_vendor}" ]; then
+    logandprint "[ERROR]: Target wheel OPP vendor not found: ${dst_vendor}. Install the full flash-linear-attention-npu wheel first."
+    exitlog
+    exit 1
+  fi
+
+  logandprint "[INFO]: Merge FLA NPU run package into installed wheel OPP root: ${wheel_opp_root}"
+  logandprint "[INFO]: Source vendor ${src_vendor}"
+  logandprint "[INFO]: Target vendor ${dst_vendor}"
+
+  confirm_aclnn_abi_changes "${src_vendor}" "${dst_vendor}"
+  merge_vendor_to_wheel_opp "${src_vendor}" "${dst_vendor}"
+  update_wheel_vendors_config "${wheel_opp_root}/vendors" "fla_npu_transformer"
+
+  logandprint "[INFO]: FLA NPU wheel OPP update completed. Restart Python processes to load the new libcust_opapi.so and kernels."
+  exitlog
+  exit 0
 }
 
 # init target_dir and log for install
@@ -601,6 +878,8 @@ main() {
   get_opts "$@"
 
   check_opts
+
+  install_wheel_opp_package
 
   init_env
 
