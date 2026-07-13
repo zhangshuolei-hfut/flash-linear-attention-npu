@@ -153,8 +153,8 @@ def _assert_close(name, actual, expected, rtol=2e-3, atol=2e-3):
     torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=rtol, atol=atol, msg=name)
 
 
-def _kda_gate_cumsum_reference(g, chunk_size, A_log=None, dt_bias=None, use_gate_in_kernel=False,
-                               safe_gate=False, lower_bound=-5.0):
+def _kda_gate_cumsum_reference(g, chunk_size, A_log=None, dt_bias=None, cu_seqlens=None,
+                               use_gate_in_kernel=False, safe_gate=False, lower_bound=-5.0):
     rcp_ln2 = 1.4426950408889634
     g_float = g.to(torch.float32)
     if use_gate_in_kernel:
@@ -177,6 +177,22 @@ def _kda_gate_cumsum_reference(g, chunk_size, A_log=None, dt_bias=None, use_gate
         gate = g_float
 
     out = torch.empty_like(gate, dtype=torch.float32)
+    if cu_seqlens is not None:
+        cu = cu_seqlens.detach().cpu().tolist() if torch.is_tensor(cu_seqlens) else list(cu_seqlens)
+        if g.dim() == 4:
+            for seq_idx in range(len(cu) - 1):
+                seq_start, seq_end = int(cu[seq_idx]), int(cu[seq_idx + 1])
+                for start in range(seq_start, seq_end, chunk_size):
+                    end = min(start + chunk_size, seq_end)
+                    out[0, start:end] = torch.cumsum(gate[0, start:end] * rcp_ln2, dim=0)
+        else:
+            for seq_idx in range(len(cu) - 1):
+                seq_start, seq_end = int(cu[seq_idx]), int(cu[seq_idx + 1])
+                for start in range(seq_start, seq_end, chunk_size):
+                    end = min(start + chunk_size, seq_end)
+                    out[start:end] = torch.cumsum(gate[start:end] * rcp_ln2, dim=0)
+        return out
+
     if g.dim() == 4:
         for b in range(g.shape[0]):
             for start in range(0, g.shape[1], chunk_size):
@@ -212,7 +228,8 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     beta = data["beta"].to(device, non_blocking=True)
     a_log = data["A_log"].to(device, non_blocking=True, dtype=torch.float32)
     dt_bias = data["dt_bias"].to(device, non_blocking=True, dtype=torch.float32)
-    cu_seqlens = data["cu_seqlens"].to(device, non_blocking=True).tolist()
+    cu_seqlens_tensor = data["cu_seqlens"].to(device, non_blocking=True)
+    cu_seqlens = cu_seqlens_tensor.tolist()
     initial_state = data["initial_state"].to(device, non_blocking=True)
 
     scale = q.shape[-1] ** -0.5
@@ -255,6 +272,7 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
         chunk_size,
         A_log=a_log,
         dt_bias=dt_bias,
+        cu_seqlens=cu_seqlens,
         use_gate_in_kernel=True,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
@@ -264,6 +282,7 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
         chunk_size,
         A_log=a_log.detach().cpu(),
         dt_bias=dt_bias.detach().cpu(),
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int64),
         use_gate_in_kernel=True,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
@@ -315,6 +334,8 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     ref_o_ntd = ref.o.squeeze(0).permute(1, 0, 2).contiguous()
     _print_stat(_stat(ref_o_ntd, "o_ref"), "  ")
     _print_stat(_stat(ref.final_state, "final_state_ref"), "  ")
+    assert torch.isfinite(ref_o_ntd).all().item(), "model shape reference o contains NaN or Inf"
+    assert torch.isfinite(ref.final_state).all().item(), "model shape reference final_state contains NaN or Inf"
 
     o_diff = (o_npu.detach().cpu() - ref_o_ntd).abs()
     fs_diff = (final_state_npu.detach().cpu() - ref.final_state).abs()
@@ -322,13 +343,11 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     _print_stat(_stat(o_diff, "o_abs_diff"), "  ")
     _print_stat(_stat(fs_diff, "fs_abs_diff"), "  ")
 
-    finite_o = torch.isfinite(ref_o_ntd)
-    finite_state = torch.isfinite(ref.final_state)
-    _assert_close("model shape o", o_npu.detach().cpu()[finite_o], ref_o_ntd[finite_o], rtol=5e-2, atol=5e-2)
+    _assert_close("model shape o", o_npu.detach().cpu(), ref_o_ntd, rtol=5e-2, atol=5e-2)
     _assert_close(
         "model shape final_state",
-        final_state_npu.detach().cpu()[finite_state],
-        ref.final_state[finite_state],
+        final_state_npu.detach().cpu(),
+        ref.final_state,
         rtol=5e-2,
         atol=5e-2,
     )
@@ -379,6 +398,76 @@ def test_chunk_kda_fwd_matches_reference():
     _assert_close("kg", got[8], ref.kg)
     _assert_close("v_new", got[9], ref.v_new)
     _assert_close("initial_state", got[11], initial_state)
+
+
+def test_chunk_kda_fwd_upper_triangle_dirty_zero():
+    device = _device()
+    if device.type == "cpu":
+        return
+
+    b, t, h, hv, kdim, vdim = 1, 64, 1, 1, 128, 128
+    torch.manual_seed(20260713)
+    q = (torch.randn(b, t, h, kdim, dtype=torch.bfloat16) * 0.02).to(device)
+    k = (torch.randn(b, t, h, kdim, dtype=torch.bfloat16) * 0.02).to(device)
+    v = (torch.randn(b, t, hv, vdim, dtype=torch.bfloat16) * 0.02).to(device)
+    g_step = torch.full((b, t, hv, kdim), -460.0 / t, dtype=torch.float32)
+    gk = torch.cumsum(g_step, dim=1).to(device)
+    beta = torch.sigmoid(torch.randn(b, t, hv, dtype=torch.float32)).to(device)
+    initial_state = torch.zeros(b, hv, kdim, vdim, dtype=torch.float32).to(device)
+    scale = kdim ** -0.5
+
+    got = torch.ops.npu.npu_chunk_kda_fwd(
+        q,
+        k,
+        v,
+        gk,
+        beta,
+        scale,
+        64,
+        layout="BSND",
+        initial_state=initial_state,
+        output_final_state=True,
+        return_intermediate=True,
+    )
+    ref = chunk_kda_forward_reference(
+        q.detach().cpu(),
+        k.detach().cpu(),
+        v.detach().cpu(),
+        gk.detach().cpu(),
+        beta.detach().cpu(),
+        scale=scale,
+        chunk_size=64,
+        initial_state=initial_state.detach().cpu(),
+        output_final_state=True,
+    )
+
+    for name, tensor in zip(("o", "final_state", "Aqk", "Akk", "w", "u", "v_new"),
+                            got[:2] + got[3:7] + got[9:10]):
+        assert torch.isfinite(tensor).all().item(), f"{name} contains NaN or Inf"
+    for name, tensor in (
+        ("ref_o", ref.o),
+        ("ref_final_state", ref.final_state),
+        ("ref_Aqk", ref.Aqk),
+        ("ref_Akk", ref.Akk),
+        ("ref_w", ref.w),
+        ("ref_u", ref.u),
+        ("ref_v_new", ref.v_new),
+    ):
+        assert torch.isfinite(tensor).all().item(), f"{name} contains NaN or Inf"
+
+    upper = torch.triu(torch.ones(t, t, dtype=torch.bool), diagonal=1)
+    diag = torch.arange(t)
+    aqk_npu = got[3].detach().float().cpu()[0, :, 0, :]
+    akk_npu = got[4].detach().float().cpu()[0, :, 0, :]
+    aqk_ref = ref.Aqk.detach().float()[0, :, 0, :]
+    akk_ref = ref.Akk.detach().float()[0, :, 0, :]
+
+    assert (aqk_npu[upper] == 0).all().item()
+    assert (akk_npu[upper] == 0).all().item()
+    assert (aqk_ref[upper] == 0).all().item()
+    assert (akk_ref[upper] == 0).all().item()
+    torch.testing.assert_close(akk_npu[diag, diag], torch.ones(t), rtol=0, atol=0)
+    torch.testing.assert_close(akk_ref[diag, diag], torch.ones(t), rtol=0, atol=0)
 
 
 def test_chunk_kda_fwd_chunk128_v128_gva_varlen():

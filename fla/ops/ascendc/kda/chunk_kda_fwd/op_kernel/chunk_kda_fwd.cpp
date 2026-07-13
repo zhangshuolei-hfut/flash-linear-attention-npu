@@ -69,6 +69,12 @@ constexpr uint32_t KDA_SOLVE_SCRATCH_SLOTS = 4;
 constexpr uint32_t KDA_SOLVE_MCH_ITERS = 2;
 constexpr uint32_t KDA_SCORE_REF_BC = 16;
 constexpr uint32_t KDA_VEC_ARENA_ELEMENTS = 32768;
+constexpr uint32_t KDA_BITS_PER_MASK_BYTE = 8;
+constexpr uint32_t KDA_SELECT_MASK_BYTES = KDA_SOLVE_MATRIX_ELEMENTS / KDA_BITS_PER_MASK_BYTE;
+constexpr uint32_t KDA_SELECT_AQK_MASK_BYTE_OFFSET = 120 * 1024;
+constexpr uint32_t KDA_SELECT_AKK_MASK_BYTE_OFFSET = KDA_SELECT_AQK_MASK_BYTE_OFFSET + KDA_SELECT_MASK_BYTES;
+constexpr uint32_t KDA_SELECT_ZERO_BYTE_OFFSET = KDA_SELECT_AKK_MASK_BYTE_OFFSET + KDA_SELECT_MASK_BYTES;
+constexpr uint32_t KDA_SELECT_ZERO_FLOAT_OFFSET = KDA_SELECT_ZERO_BYTE_OFFSET / sizeof(float);
 constexpr uint8_t KDA_SCORE_DONE_FLAG0 = 2;
 constexpr uint8_t KDA_SCORE_DONE_FLAG1 = 3;
 constexpr uint8_t KDA_SCORE_READY_FLAG0 = 4;
@@ -1046,6 +1052,9 @@ private:
                 akkRow[j] = 0.0f;
             }
             for (uint64_t j = 0; j < curT; ++j) {
+                if (j > i) {
+                    continue;
+                }
                 uint64_t tj = start + j;
                 float aqkRaw = 0.0f;
                 float akkRaw = 0.0f;
@@ -1059,7 +1068,9 @@ private:
                     akkRaw += ki * kj * gatePtr[d];
                 }
                 aqkRow[j] = aqkRaw;
-                akkRow[j] = akkRaw;
+                if (j < i) {
+                    akkRow[j] = akkRaw;
+                }
             }
             CopyStackFloatRowOut(aqk_, AOffset(b, hv, ti, 0), aqkRow, BT_, 0);
             CopyStackFloatRowOut(akk_, AOffset(b, hv, ti, 0), akkRow, BT_, 1);
@@ -1161,6 +1172,50 @@ private:
         PipeBarrier<PIPE_V>();
     }
 
+    __aicore__ inline void BuildCausalSelectMasks(LocalTensor<uint8_t> aqkMask, LocalTensor<uint8_t> akkMask,
+                                                  uint64_t rowBegin, uint64_t rowCount)
+    {
+        constexpr uint32_t blocksPerRow = KDA_SOLVE_BT / KDA_BITS_PER_MASK_BYTE;
+        for (uint32_t localRow = 0; localRow < rowCount; ++localRow) {
+            uint32_t row = static_cast<uint32_t>(rowBegin + localRow);
+            for (uint32_t block = 0; block < blocksPerRow; ++block) {
+                uint32_t colBase = block * KDA_BITS_PER_MASK_BYTE;
+                uint8_t aqkMaskValue = 0;
+                uint8_t akkMaskValue = 0;
+                for (uint32_t bit = 0; bit < KDA_BITS_PER_MASK_BYTE; ++bit) {
+                    uint32_t col = colBase + bit;
+                    if (col > row) {
+                        aqkMaskValue |= static_cast<uint8_t>(1U << bit);
+                    }
+                    if (col >= row) {
+                        akkMaskValue |= static_cast<uint8_t>(1U << bit);
+                    }
+                }
+                uint32_t offset = localRow * blocksPerRow + block;
+                aqkMask.SetValue(offset, aqkMaskValue);
+                akkMask.SetValue(offset, akkMaskValue);
+            }
+        }
+    }
+
+    __aicore__ inline void SelectCausalRows(LocalTensor<float> aqkMat, LocalTensor<float> akkMat,
+                                            uint64_t rowBegin, uint64_t rowCount)
+    {
+        LocalTensor<uint8_t> aqkMask = vecBuf_.Get<uint8_t>()[KDA_SELECT_AQK_MASK_BYTE_OFFSET];
+        LocalTensor<uint8_t> akkMask = vecBuf_.Get<uint8_t>()[KDA_SELECT_AKK_MASK_BYTE_OFFSET];
+        LocalTensor<float> zeroLocal = vecBuf_.Get<float>()[KDA_SELECT_ZERO_FLOAT_OFFSET];
+        BuildCausalSelectMasks(aqkMask, akkMask, rowBegin, rowCount);
+        Duplicate(zeroLocal, 0.0f, 8);
+        PipeBarrier<PIPE_V>();
+
+        BinaryRepeatParams repeatParams = {1, 0, 1, 8, 0, 8};
+        Select(aqkMat, aqkMask, zeroLocal, aqkMat, SELMODE::VSEL_TENSOR_TENSOR_MODE, KDA_SOLVE_BT,
+               static_cast<uint8_t>(rowCount), repeatParams);
+        Select(akkMat, akkMask, zeroLocal, akkMat, SELMODE::VSEL_TENSOR_TENSOR_MODE, KDA_SOLVE_BT,
+               static_cast<uint8_t>(rowCount), repeatParams);
+        PipeBarrier<PIPE_V>();
+    }
+
     __aicore__ inline void PrepareAqkAkkSolveInput64(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start)
     {
         LocalTensor<float> arena = vecBuf_.Get<float>();
@@ -1200,15 +1255,7 @@ private:
             Mul(akkMat[col], akkMat[col], betaBrcb, 8, KDA_SOLVE_BT, {1, 1, 1, 8, 8, 1});
             PipeBarrier<PIPE_V>();
         }
-        for (uint64_t row = 0; row < KDA_SOLVE_BT; ++row) {
-            BuildPrefixMask(maskLocal, row + 1, KDA_SOLVE_BT);
-            Mul(aqkMat[row * KDA_SOLVE_BT], aqkMat[row * KDA_SOLVE_BT], maskLocal, KDA_SOLVE_BT);
-            PipeBarrier<PIPE_V>();
-
-            BuildPrefixMask(maskLocal, row, KDA_SOLVE_BT);
-            Mul(akkMat[row * KDA_SOLVE_BT], akkMat[row * KDA_SOLVE_BT], maskLocal, KDA_SOLVE_BT);
-            PipeBarrier<PIPE_V>();
-        }
+        SelectCausalRows(aqkMat, akkMat, 0, KDA_SOLVE_BT);
 
         Muls(xMat, akkMat, -1.0f, KDA_SOLVE_MATRIX_ELEMENTS);
         PipeBarrier<PIPE_V>();
@@ -1303,15 +1350,7 @@ private:
             Mul(akkMat[col], akkMat[col], betaBrcb, 8, KDA_SOLVE_BT, {1, 1, 1, 8, 8, 1});
             PipeBarrier<PIPE_V>();
         }
-        for (uint64_t row = 0; row < KDA_SOLVE_BT; ++row) {
-            BuildPrefixMask(maskLocal, row + 1, KDA_SOLVE_BT);
-            Mul(aqkMat[row * KDA_SOLVE_BT], aqkMat[row * KDA_SOLVE_BT], maskLocal, KDA_SOLVE_BT);
-            PipeBarrier<PIPE_V>();
-
-            BuildPrefixMask(maskLocal, row, KDA_SOLVE_BT);
-            Mul(akkMat[row * KDA_SOLVE_BT], akkMat[row * KDA_SOLVE_BT], maskLocal, KDA_SOLVE_BT);
-            PipeBarrier<PIPE_V>();
-        }
+        SelectCausalRows(aqkMat, akkMat, 0, KDA_SOLVE_BT);
 
         Muls(xMat, akkMat, -1.0f, KDA_SOLVE_MATRIX_ELEMENTS);
         PipeBarrier<PIPE_V>();
@@ -1415,16 +1454,7 @@ private:
             Mul(akkMat[col], akkMat[col], betaBrcb, 8, static_cast<uint8_t>(rowCount), {1, 1, 1, 8, 8, 1});
             PipeBarrier<PIPE_V>();
         }
-        for (uint64_t localRow = 0; localRow < rowCount; ++localRow) {
-            uint64_t row = rowBegin + localRow;
-            BuildPrefixMask(maskLocal, row + 1, KDA_SOLVE_BT);
-            Mul(aqkMat[localRow * KDA_SOLVE_BT], aqkMat[localRow * KDA_SOLVE_BT], maskLocal, KDA_SOLVE_BT);
-            PipeBarrier<PIPE_V>();
-
-            BuildPrefixMask(maskLocal, row, KDA_SOLVE_BT);
-            Mul(akkMat[localRow * KDA_SOLVE_BT], akkMat[localRow * KDA_SOLVE_BT], maskLocal, KDA_SOLVE_BT);
-            PipeBarrier<PIPE_V>();
-        }
+        SelectCausalRows(aqkMat, akkMat, rowBegin, rowCount);
 
         Muls(xMat, akkMat, -1.0f, static_cast<uint32_t>(elemCount));
         PipeBarrier<PIPE_V>();

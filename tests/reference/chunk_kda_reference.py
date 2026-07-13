@@ -153,11 +153,15 @@ def chunk_kda_forward_reference(
             g_blk = gk[b, start:end, ihv].to(torch.float32)
             beta_blk = beta[b, start:end, ihv].to(torch.float32)
 
+            causal = torch.ones((cur_t, cur_t), device=device, dtype=torch.bool).tril()
+            strict_causal = torch.ones((cur_t, cur_t), device=device, dtype=torch.bool).tril(diagonal=-1)
             rel = g_blk[:, None, :] - g_blk[None, :, :]
-            qk = torch.einsum("ik,jk,ijk->ij", q_blk, k_blk, torch.exp2(rel)) * float(scale)
-            kk = torch.einsum("ik,jk,ijk->ij", k_blk, k_blk, torch.exp2(rel))
-            tril_qk = torch.tril(qk, diagonal=0)
-            tril_kk = torch.tril(kk * beta_blk[:, None], diagonal=-1)
+            rel = rel.masked_fill(~causal[:, :, None], 0.0)
+            gate = torch.exp2(rel)
+            qk = torch.einsum("ik,jk,ijk->ij", q_blk, k_blk, gate) * float(scale)
+            kk = torch.einsum("ik,jk,ijk->ij", k_blk, k_blk, gate)
+            tril_qk = torch.where(causal, qk, torch.zeros_like(qk))
+            tril_kk = torch.where(strict_causal, kk * beta_blk[:, None], torch.zeros_like(kk))
             inv_akk = _lower_inverse(tril_kk)
 
             k_beta_g = k_blk * beta_blk[:, None] * torch.exp2(g_blk)
