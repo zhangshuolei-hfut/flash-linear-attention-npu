@@ -12,10 +12,7 @@ try:
 except Exception:  # pragma: no cover - CPU fallback for syntax/smoke only
     torch_npu = None
 
-import fla_npu  # noqa: F401
-
-if torch_npu is not None:
-    fla_npu.load_legacy_torch_ops()
+from fla_npu.ops import ascendc as fla_ascendc
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -268,7 +265,7 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     _print_stat(_stat(k_rstd, "k_rstd"), "  ")
 
     print("\n--- Gate Cumsum ---")
-    gk = torch.ops.npu.npu_kda_gate_cumsum(
+    gk = fla_ascendc.kda_gate_cumsum(
         g,
         chunk_size,
         A_log=a_log,
@@ -299,7 +296,7 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     beta_nt = beta.squeeze(0).permute(1, 0).contiguous()
 
     print("\n--- Chunk KDA Forward ---")
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q_ntd,
         k_ntd,
         v_ntd,
@@ -363,7 +360,7 @@ def test_chunk_kda_fwd_matches_reference():
     q, k, v, gk, beta, initial_state = _make_inputs(device, h=1, hv=1, t=16)
     scale = q.shape[-1] ** -0.5
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q,
         k,
         v,
@@ -417,7 +414,7 @@ def test_chunk_kda_fwd_upper_triangle_dirty_zero():
     initial_state = torch.zeros(b, hv, kdim, vdim, dtype=torch.float32).to(device)
     scale = kdim ** -0.5
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q,
         k,
         v,
@@ -479,7 +476,7 @@ def test_chunk_kda_fwd_chunk128_rejected_as_unsupported():
     scale = q.shape[-1] ** -0.5
     cu_seqlens = [0, 6, 16]
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -506,7 +503,7 @@ def test_chunk_kda_fwd_varlen_initial_state_shape_rejected():
     scale = q.shape[-1] ** -0.5
     cu_seqlens = [0, 6, 16]
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -532,7 +529,7 @@ def test_chunk_kda_fwd_bf16_chunk32_rejected_as_unsupported():
     q, k, v, gk, beta, initial_state = _make_inputs(device, h=1, hv=1, t=8, dtype=torch.bfloat16)
     scale = q.shape[-1] ** -0.5
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -562,7 +559,7 @@ def test_chunk_kda_fwd_bf16_gate_matches_reference():
     beta_bf16 = beta.detach().to(torch.bfloat16).requires_grad_(True)
     scale = q.shape[-1] ** -0.5
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q,
         k,
         v,
@@ -601,7 +598,7 @@ def test_chunk_kda_fwd_fp16_matches_reference():
     )
     scale = q.shape[-1] ** -0.5
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q,
         k,
         v,
@@ -643,7 +640,7 @@ def test_chunk_kda_fwd_tnd_matches_reference():
     q, k, v, gk, beta, initial_state = _make_inputs(device, b=1, h=1, hv=2, t=8)
     scale = q.shape[-1] ** -0.5
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q.squeeze(0),
         k.squeeze(0),
         v.squeeze(0),
@@ -693,7 +690,7 @@ def test_chunk_kda_fwd_tnd_multi_head_rejected():
     gk = torch.randn(t, hv, kdim, device=device, dtype=torch.float32)
     beta = torch.rand(t, hv, device=device, dtype=torch.float32)
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -716,7 +713,7 @@ def test_chunk_kda_fwd_lowercase_layout_rejected():
         return
     q, k, v, gk, beta, _ = _make_inputs(device, h=1, hv=1, t=8)
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -743,7 +740,7 @@ def test_chunk_kda_fwd_head_num_gt128_rejected():
     gk = torch.randn(hv, t, kdim, device=device, dtype=torch.float32)
     beta = torch.rand(hv, t, device=device, dtype=torch.float32)
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -771,7 +768,7 @@ def test_chunk_kda_fwd_bnsd_direct_matches_reference():
     gk_bnsd = gk.permute(0, 2, 1, 3).contiguous()
     beta_bns = beta.permute(0, 2, 1).contiguous()
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q_bnsd,
         k_bnsd,
         v_bnsd,
@@ -822,7 +819,7 @@ def test_chunk_kda_fwd_ntd_direct_matches_reference():
     gk_ntd = gk.squeeze(0).permute(1, 0, 2).contiguous()
     beta_nt = beta.squeeze(0).permute(1, 0).contiguous()
 
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q_ntd,
         k_ntd,
         v_ntd,
@@ -867,12 +864,12 @@ def test_kda_gate_cumsum_default_and_fwd_integration():
         return
     q, k, v, _, beta, initial_state = _make_inputs(device, h=1, hv=2, t=40, dtype=torch.float16)
     g_step = (torch.randn(1, 40, 2, 128, dtype=torch.bfloat16) * 0.001).to(device)
-    gk = torch.ops.npu.npu_kda_gate_cumsum(g_step, 64)
+    gk = fla_ascendc.kda_gate_cumsum(g_step, 64)
     ref_gk = _kda_gate_cumsum_reference(g_step.detach().cpu(), 64)
     _assert_close("gate cumsum default", gk, ref_gk, rtol=2e-3, atol=2e-3)
 
     scale = q.shape[-1] ** -0.5
-    got = torch.ops.npu.npu_chunk_kda_fwd(
+    got = fla_ascendc.chunk_kda_fwd(
         q,
         k,
         v,
@@ -908,7 +905,7 @@ def test_chunk_kda_fwd_small_k_rejected_as_unsupported():
         return
     q, k, v, gk, beta, _ = _make_inputs(device, h=1, hv=1, t=8, kdim=8, vdim=128, dtype=torch.float16)
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -930,7 +927,7 @@ def test_chunk_kda_fwd_float_q_rejected_as_unsupported():
         return
     q, k, v, gk, beta, _ = _make_inputs(device, h=1, hv=1, t=8, dtype=torch.float32)
     try:
-        torch.ops.npu.npu_chunk_kda_fwd(
+        fla_ascendc.chunk_kda_fwd(
             q,
             k,
             v,
@@ -953,7 +950,7 @@ def test_kda_gate_cumsum_bnsd_direct_matches_reference():
     torch.manual_seed(6789)
     g_bsnd = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.001).to(device)
     g_bnsd = g_bsnd.permute(0, 2, 1, 3).contiguous()
-    got = torch.ops.npu.npu_kda_gate_cumsum(g_bnsd, 32)
+    got = fla_ascendc.kda_gate_cumsum(g_bnsd, 32)
     ref = _kda_gate_cumsum_reference(g_bsnd.detach().cpu(), 32).permute(0, 2, 1, 3)
     _assert_close("gate cumsum bnsd", got, ref, rtol=2e-3, atol=2e-3)
 
@@ -965,7 +962,7 @@ def test_kda_gate_cumsum_ntd_direct_matches_reference():
     torch.manual_seed(7890)
     g_bsnd = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.001).to(device)
     g_ntd = g_bsnd.squeeze(0).permute(1, 0, 2).contiguous()
-    got = torch.ops.npu.npu_kda_gate_cumsum(g_ntd, 32)
+    got = fla_ascendc.kda_gate_cumsum(g_ntd, 32)
     ref = _kda_gate_cumsum_reference(g_bsnd.squeeze(0).detach().cpu(), 32).permute(1, 0, 2)
     _assert_close("gate cumsum ntd", got, ref, rtol=2e-3, atol=2e-3)
 
@@ -978,7 +975,7 @@ def test_kda_gate_cumsum_safe_gate_matches_reference():
     raw = (torch.randn(1, 40, 2, 8, dtype=torch.bfloat16) * 0.5).to(device)
     a_log = (torch.randn(2, dtype=torch.float32) * 0.1).to(device)
     dt_bias = (torch.randn(2, 8, dtype=torch.float32) * 0.1).to(device)
-    got = torch.ops.npu.npu_kda_gate_cumsum(
+    got = fla_ascendc.kda_gate_cumsum(
         raw,
         32,
         A_log=a_log,
@@ -1008,7 +1005,7 @@ def test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference():
     raw = torch.randn(1, 1536, 2, 128, dtype=torch.bfloat16).to(device)
     a_log = torch.log(torch.empty(2, dtype=torch.float32).uniform_(1, 16)).to(device)
     dt_bias = torch.randn(2 * 128, dtype=torch.float32).to(device)
-    got = torch.ops.npu.npu_kda_gate_cumsum(
+    got = fla_ascendc.kda_gate_cumsum(
         raw,
         chunk_size,
         A_log=a_log,
