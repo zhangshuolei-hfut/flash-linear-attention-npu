@@ -4,12 +4,12 @@
 `torch_npu` dispatcher、PyTorch C++ extension ABI、CPython ABI 和 C++ ABI 绑定。
 这份设计可以作为其他自定义 Ascend C 算子仓库的一键 wheel 化参考。
 
-图源文件见 [`assets/fla-npu-decoupled-runtime.drawio`](assets/fla-npu-decoupled-runtime.drawio)，
-Markdown 中直接渲染的 SVG 见 [`assets/fla-npu-decoupled-runtime.svg`](assets/fla-npu-decoupled-runtime.svg)。
-版本依赖对比图源见 [`assets/fla-npu-version-dependency.drawio`](assets/fla-npu-version-dependency.drawio)，
-SVG 见 [`assets/fla-npu-version-dependency.svg`](assets/fla-npu-version-dependency.svg)。
+图源文件见 [`../assets/fla-npu-decoupled-runtime.drawio`](../assets/fla-npu-decoupled-runtime.drawio)，
+Markdown 中直接渲染的 SVG 见 [`../assets/fla-npu-decoupled-runtime.svg`](../assets/fla-npu-decoupled-runtime.svg)。
+版本依赖对比图源见 [`../assets/fla-npu-version-dependency.drawio`](../assets/fla-npu-version-dependency.drawio)，
+SVG 见 [`../assets/fla-npu-version-dependency.svg`](../assets/fla-npu-version-dependency.svg)。
 
-![fla_npu 解耦运行时架构](assets/fla-npu-decoupled-runtime.svg)
+![fla_npu 解耦运行时架构](../assets/fla-npu-decoupled-runtime.svg)
 
 ## 设计目标
 
@@ -24,7 +24,7 @@ SVG 见 [`assets/fla-npu-version-dependency.svg`](assets/fla-npu-version-depende
 
 很多自定义算子仓库出现“只能在某个 torch、torch_npu、Python 或 gcc 组合里安装”的问题，本质上是把宿主框架的二进制 ABI 编进了 wheel。只要 wheel 内出现 Python C extension、PyTorch C++ extension 或 torch_npu dispatcher 注册库，就会把构建时环境的一部分冻结到产物里。
 
-![版本依赖来源和解耦边界](assets/fla-npu-version-dependency.svg)
+![版本依赖来源和解耦边界](../assets/fla-npu-version-dependency.svg)
 
 常见版本依赖来源如下：
 
