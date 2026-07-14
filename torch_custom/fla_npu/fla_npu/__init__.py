@@ -177,7 +177,7 @@ def load_legacy_torch_ops() -> pathlib.Path:
     import torch
     import torch_npu
 
-    _prepare_embedded_opp()
+    load_ascendc_opapi_libraries()
     _preload_torch_npu_dependencies(torch, torch_npu)
     legacy_library = _find_ascendc_extension_library()
     torch.ops.load_library(str(legacy_library))
