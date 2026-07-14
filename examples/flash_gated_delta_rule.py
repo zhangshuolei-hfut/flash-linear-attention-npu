@@ -31,8 +31,6 @@ from fla_npu.ops.ascendc import (
     chunk_fwd_o as ascendc_chunk_fwd_o,
     chunk_gated_delta_rule_bwd_dhu as ascendc_chunk_gated_delta_rule_bwd_dhu,
     chunk_gated_delta_rule_fwd_h as ascendc_chunk_gated_delta_rule_fwd_h,
-    chunk_local_cumsum as ascendc_chunk_local_cumsum,
-    chunk_scaled_dot_kkt as ascendc_chunk_scaled_dot_kkt,
     prepare_wy_repr_bwd_da as ascendc_prepare_wy_repr_bwd_da,
     prepare_wy_repr_bwd_full as ascendc_prepare_wy_repr_bwd_full,
     recompute_w_u_fwd as ascendc_recompute_w_u_fwd,
@@ -41,6 +39,8 @@ from fla_npu.ops.ascendc import (
 from fla_npu.ops.triton import (
     autocast_custom_bwd,
     autocast_custom_fwd,
+    chunk_local_cumsum,
+    chunk_scaled_dot_kkt_fwd,
     input_guard,
     l2norm_bwd,
     l2norm_fwd,
@@ -459,7 +459,7 @@ def _as_chunk_list_dict(
 
 
 def _cumsum_block_t(g: torch.Tensor, chunk_size: int) -> int:
-    # Keep this aligned with the AscendC chunk_local_cumsum chunk index contract.
+    # Keep this aligned with fla_npu.ops.triton.chunk_local_cumsum_scalar.
     return int(chunk_size)
 
 
@@ -559,32 +559,24 @@ def flash_chunk_gated_delta_rule_fwd(
     chunk_indices_list: Optional[Dict[str, Optional[list[int]]]] = None,
     chunk_size: int = 64,
 ):
-    scaled_dot_cu_seqlens = None
-    scaled_dot_chunk_indices = None
-    if cu_seqlens is not None:
-        scaled_dot_cu_seqlens = _as_int_list(cu_seqlens_list) or _as_int_list(cu_seqlens)
-        scaled_dot_chunk_indices = _chunk_list(chunk_indices_list, chunk_size)
-        if scaled_dot_chunk_indices is None:
-            scaled_dot_chunk_indices = _as_int_list(_chunk_tensor(chunk_indices, chunk_size))
-
-    g_bht = ascendc_chunk_local_cumsum(
-        g.transpose(1, 2).contiguous().float(),
+    g = chunk_local_cumsum(
+        g,
         chunk_size=chunk_size,
         cu_seqlens=cu_seqlens,
-        chunk_indices_out=_chunk_tensor(chunk_indices, _cumsum_block_t(g, chunk_size)),
-        head_first=True,
-        output_dtype="float32",
+        chunk_indices_out=chunk_indices,
+        head_first=False,
     )
-    beta_bht = beta.transpose(1, 2).contiguous().float()
 
-    A = ascendc_chunk_scaled_dot_kkt(
-        k,
-        g_bht,
-        beta_bht,
-        cu_seqlens=scaled_dot_cu_seqlens,
-        chunk_indices=scaled_dot_chunk_indices,
+    # A is the WY lower-triangular representation before inversion.
+    A = chunk_scaled_dot_kkt_fwd(
+        k=k,
+        g=g,
+        beta=beta,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=_chunk_tensor(chunk_indices, chunk_size),
         chunk_size=chunk_size,
-    ).transpose(1, 2).contiguous()
+        output_dtype=torch.float32,
+    )
 
     A = solve_tri_auto(
         A,
@@ -595,8 +587,8 @@ def flash_chunk_gated_delta_rule_fwd(
         output_dtype=k.dtype,
     )
 
-    g = g_bht
-    beta = beta_bht
+    g = g.transpose(1, 2).contiguous()
+    beta = beta.transpose(1, 2).contiguous().float()
     A = A.transpose(1, 2).contiguous()
 
     w, u = recompute_w_u(
@@ -783,15 +775,14 @@ def flash_chunk_gated_delta_rule_bwd(
     if dg.dtype != torch.float32:
         raise ValueError(f"dg current type is {dg.dtype}, should be float32")
 
-    dg = ascendc_chunk_local_cumsum(
-        dg.transpose(1, 2).contiguous(),
+    dg = chunk_local_cumsum(
+        dg,
         chunk_size=chunk_size,
         reverse=True,
         cu_seqlens=cu_seqlens,
-        chunk_indices_out=_chunk_tensor(chunk_indices, _cumsum_block_t(dg, chunk_size)),
-        head_first=True,
-        output_dtype="float32",
-    ).transpose(1, 2).contiguous()
+        chunk_indices_out=chunk_indices,
+        head_first=False,
+    )
 
     return dq, dk, dv, db, dg, dh0
 
