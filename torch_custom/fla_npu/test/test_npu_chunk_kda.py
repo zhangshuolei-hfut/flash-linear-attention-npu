@@ -87,6 +87,17 @@ def _print_stat(stat_dict, prefix=""):
     )
 
 
+def _print_first_nonfinite(tensor, name, prefix=""):
+    if hasattr(tensor, "is_npu") and tensor.is_npu:
+        torch.npu.synchronize()
+    flat = tensor.detach().flatten().float().cpu()
+    bad = ~torch.isfinite(flat)
+    if not bad.any().item():
+        return
+    idx = int(bad.nonzero(as_tuple=False)[0].item())
+    print(f"{prefix}{name}: first non-finite flat_index={idx}, value={flat[idx].item()}")
+
+
 def _l2norm_fwd_torch(x, eps=1e-6):
     x_float = x.float()
     rstd = torch.rsqrt(x_float.pow(2).sum(dim=-1, keepdim=True) + eps)
@@ -308,11 +319,29 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
         initial_state=initial_state,
         cu_seqlens=cu_seqlens,
         output_final_state=True,
-        return_intermediate=False,
+        return_intermediate=True,
     )
     o_npu, final_state_npu = got[0], got[1]
-    _print_stat(_stat(o_npu, "o_npu"), "  ")
-    _print_stat(_stat(final_state_npu, "final_state_npu"), "  ")
+    for name, tensor in [
+        ("o_npu", o_npu),
+        ("final_state_npu", final_state_npu),
+        ("g_out", got[2]),
+        ("Aqk_npu", got[3]),
+        ("Akk_npu", got[4]),
+        ("w_npu", got[5]),
+        ("u_npu", got[6]),
+        ("qg_npu", got[7]),
+        ("kg_npu", got[8]),
+        ("v_new_npu", got[9]),
+        ("h_npu", got[10]),
+        ("initial_state_out", got[11]),
+    ]:
+        if tensor.numel() == 0:
+            continue
+        stat = _stat(tensor, name)
+        _print_stat(stat, "  ")
+        if stat["has_nan"] or stat["has_inf"]:
+            _print_first_nonfinite(tensor, name, "  ")
     assert torch.isfinite(o_npu).all().item(), "model shape o contains NaN or Inf"
     assert torch.isfinite(final_state_npu).all().item(), "model shape final_state contains NaN or Inf"
 

@@ -66,7 +66,8 @@ constexpr uint32_t KDA_SOLVE_SCRATCH_Y0 = 1;
 constexpr uint32_t KDA_SOLVE_SCRATCH_TMP = 2;
 constexpr uint32_t KDA_SOLVE_SCRATCH_Y1 = 3;
 constexpr uint32_t KDA_SOLVE_SCRATCH_SLOTS = 4;
-constexpr uint32_t KDA_SOLVE_MCH_ITERS = 2;
+// Direct 64x64 MCH needs five rounds to cover all strict-lower powers up to 63.
+constexpr uint32_t KDA_SOLVE_MCH_ITERS = 5;
 constexpr uint32_t KDA_SCORE_REF_BC = 16;
 constexpr uint32_t KDA_VEC_ARENA_ELEMENTS = 32768;
 constexpr uint32_t KDA_BITS_PER_MASK_BYTE = 8;
