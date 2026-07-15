@@ -222,7 +222,11 @@ def _kda_gate_cumsum_reference(g, chunk_size, A_log=None, dt_bias=None, cu_seqle
     return out
 
 
-def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
+def _run_chunk_kda_fwd_model_shape_with_stats(
+    dump_path=None,
+    device_id=None,
+    use_initial_state=True,
+):
     device = _device(device_id)
     if device.type == "cpu":
         print("skip model-shape stats test on CPU")
@@ -247,7 +251,11 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     dt_bias = data["dt_bias"].to(device, non_blocking=True, dtype=torch.float32)
     cu_seqlens_tensor = data["cu_seqlens"].to(device, non_blocking=True)
     cu_seqlens = cu_seqlens_tensor.tolist()
-    initial_state = data["initial_state"].to(device, non_blocking=True)
+    initial_state = (
+        data["initial_state"].to(device, non_blocking=True)
+        if use_initial_state
+        else None
+    )
 
     scale = q.shape[-1] ** -0.5
     chunk_size = int(data.get("chunk_size", MODEL_SHAPE_CASE["chunk_size"]))
@@ -255,15 +263,20 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
     lower_bound = float(data.get("lower_bound", -5.0))
 
     print("\n" + "=" * 80)
-    print(f"=== KDA Forward Model-Shape Guard (device={device}) ===")
+    initial_state_mode = "tensor" if use_initial_state else "None"
+    print(
+        f"=== KDA Forward Model-Shape Guard "
+        f"(device={device}, initial_state={initial_state_mode}) ==="
+    )
     print("=" * 80)
     print(f"[Meta] scale={scale:.6f}, chunk_size={chunk_size}")
     print(f"[Meta] cu_seqlens={cu_seqlens}")
     print(f"[Meta] safe_gate={safe_gate}, lower_bound={lower_bound}")
+    print(f"[Meta] initial_state={initial_state_mode}")
     print(f"[Meta] dump_path={dump_path}")
 
     print("\n--- Input Statistics ---")
-    for name, tensor in [
+    input_tensors = [
         ("q", q),
         ("k", k),
         ("v", v),
@@ -271,8 +284,10 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
         ("beta", beta),
         ("A_log", a_log),
         ("dt_bias", dt_bias),
-        ("initial_state", initial_state),
-    ]:
+    ]
+    if initial_state is not None:
+        input_tensors.append(("initial_state", initial_state))
+    for name, tensor in input_tensors:
         _print_stat(_stat(tensor, name), "  ")
 
     q, q_rstd = _l2norm_fwd_torch(q)
@@ -361,6 +376,10 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
             _print_first_nonfinite(tensor, name, "  ")
     assert torch.isfinite(o_npu).all().item(), "model shape o contains NaN or Inf"
     assert torch.isfinite(final_state_npu).all().item(), "model shape final_state contains NaN or Inf"
+    if initial_state is None:
+        assert got[11].numel() == 0, "initial_state_out must be empty when initial_state is None"
+    else:
+        _assert_close("model shape initial_state_out", got[11], initial_state, rtol=0, atol=0)
 
     previous_num_threads = torch.get_num_threads()
     reference_num_threads = max(1, min(REFERENCE_NUM_THREADS, previous_num_threads))
@@ -376,7 +395,7 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
             beta.detach().cpu(),
             scale=scale,
             chunk_size=chunk_size,
-            initial_state=initial_state.detach().cpu(),
+            initial_state=None if initial_state is None else initial_state.detach().cpu(),
             output_final_state=True,
             cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int64),
         )
@@ -405,6 +424,22 @@ def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
         ref.final_state,
         rtol=5e-2,
         atol=5e-2,
+    )
+
+
+def test_chunk_kda_fwd_model_shape_with_stats(dump_path=None, device_id=None):
+    _run_chunk_kda_fwd_model_shape_with_stats(
+        dump_path=dump_path,
+        device_id=device_id,
+        use_initial_state=True,
+    )
+
+
+def test_chunk_kda_fwd_model_shape_initial_state_none_with_stats(dump_path=None, device_id=None):
+    _run_chunk_kda_fwd_model_shape_with_stats(
+        dump_path=dump_path,
+        device_id=device_id,
+        use_initial_state=False,
     )
 
 
@@ -1183,6 +1218,7 @@ if __name__ == "__main__":
     test_chunk_gdn_fwd_h_gk_only_matches_neutral_g()
     test_chunk_kda_fwd_upper_triangle_dirty_zero()
     test_chunk_kda_fwd_model_shape_with_stats()
+    test_chunk_kda_fwd_model_shape_initial_state_none_with_stats()
 
     for negative_test in (
         "test_chunk_kda_fwd_chunk128_rejected_as_unsupported",
