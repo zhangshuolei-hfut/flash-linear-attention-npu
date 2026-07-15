@@ -468,6 +468,57 @@ AIC: 对所有 tile 都 wait ready
 - flag id 需要集中管理，不要散落魔法数字。
 - 不允许 producer 连续 set 同一个 flag 而 consumer 还没 wait，必要时用 reverse/free flag。
 
+### 7.4 元数据不能按元素走热点 MTE 流水
+
+异步 AICore 错误经常在后续第一个同步点才暴露。例如测试代码在 `_stat()` 中调用 `torch.npu.synchronize()` 时看到 507014，并不表示统计函数有问题；应先定位同步点之前最后下发的 kernel 和 stage。
+
+一种高风险写法是对每个 chunk 反复搬运单个 `int64` 元数据：
+
+```cpp
+for (uint64_t task = coreIdx; task < taskCount; task += coreNum) {
+    DataCopyPad(metaUb, chunkIndicesGm[task * 2], eightBytes, pad);
+    SetFlag<HardEvent::MTE2_V>(eventId);
+    WaitFlag<HardEvent::MTE2_V>(eventId);
+    SetFlag<HardEvent::V_S>(scalarEventId);
+    WaitFlag<HardEvent::V_S>(scalarEventId);
+    // 再从 UB 取 seq/localChunk，继续当前 task。
+}
+```
+
+这种实现即使没有数学错误，也会产生以下问题：
+
+- 每个 task 为 8 字节数据下发一次 `DataCopyPad`，有效载荷远小于 MTE cacheline。
+- 元数据读取把 MTE2、VEC 和 Scalar 事件串成细粒度控制链，长序列下指令和事件数量随 chunk 数线性增长。
+- 调试时常表现为小 shape 正常，长序列在 AIV timeout；异常在 Python 后续同步处才被观察到。
+- 为修复 timeout 继续叠加 barrier 只会扩大串行区，不能解决搬运粒度和元数据归属错误。
+
+更合理的方案是把不变控制信息留在 host/tiling 边界：
+
+```text
+L2:
+  校验 cu_seqlens/chunk_indices
+  -> 规范化为 (seq_id, local_chunk)
+  -> chunk_map = (seq_id << 16) | local_chunk
+  -> 同时保存每条序列的 seq_start/seq_end
+
+Kernel:
+  packed = tiling.chunk_map[flat_chunk]
+  seq = packed >> 16
+  local_chunk = packed & 0xffff
+  start = tiling.seq_start[seq] + local_chunk * chunk_size
+  end = min(start + chunk_size, tiling.seq_end[seq])
+```
+
+这里的 scalar 只用于任务索引和 offset 推导，不承担矩阵或向量数值计算。容量必须由 tiling data/tiling stack 的实际上限推导并在 Python、L2 和文档三处统一拦截；超过容量时按完整序列边界拆分请求。
+
+定位这类问题时建议按以下顺序缩小范围：
+
+1. 开启 launch blocking 或在 L2 增加仅用于调试的 stage stop，确定首个出错 kernel。
+2. 固定输入多次运行，区分确定性死等、未初始化读取和随机 race。
+3. 检查热点循环里的小块 `DataCopyPad`、事件对和跨核 ready/free 计数。
+4. 用 memcheck/synccheck 前确认实际对象带 sanitizer 符号，日志出现 `Start ... sanitizer on kernel ...`。
+5. 修复后回到原长序列、原 layout、原 dtype 和原调用链验证，不能只用缩小后的定位 shape 收尾。
+
 ## 8. Gate、指数和数值范围
 
 ### 8.1 `gk` 合法值域

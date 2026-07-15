@@ -119,6 +119,8 @@ BNSD 和 NTD 是性能布局，适用于上游 causal conv 已经完成数据排
 
 当前 TND 兼容布局仅支持 `H=1` 的 rank3 输入。多 K head 的 rank3 输入必须使用 NTD 性能布局 `[H, T, D]`；host 侧会直接拦截 `layout=TND && H>1`，避免进入 `fwd_h` kernel 后触发非法访存。当前 `H/HV` 均要求不超过 128。
 
+变长序列（varlen）单次调用最多支持 1024 条序列、4096 个 chunk。超过容量时需要在序列边界拆分请求；稳定 Python 入口和 L2 接口都会在下发 kernel 前返回明确的参数错误。空序列仍按 `cu_seqlens` 非递减语义支持，不占用 chunk。
+
 支持的数据类型（dtype）语义：
 
 - `q/k/v/o/Aqk/Akk/w/u/qg/kg/v_new/h`：根据张量角色跟随 `q` 或 `v` 的 dtype，算子注册覆盖 `fp16`、`bf16` 和 32 位浮点（fp32）；其中 `kg` 表示 key-gated k 中间张量，不是 `gk` 输入。
@@ -400,7 +402,8 @@ UB 使用原则：
 
 已知验证边界：
 
-- 高 `K/V` 的非 chunk 对齐 `cu_seqlens` 在当前 prototype 中可能触发 kernel timeout。在 dedicated partial-chunk 路径实现并验证前，不宣称已优化 varlen high `K/V` 支持。
+- 高 `K/V` 的非 chunk 对齐 `cu_seqlens` 已改为由 L2 一次性规范化 chunk 元数据，并通过 tiling 下发紧凑索引；kernel 热点循环不再逐项从 GM 搬运 `int64` 元数据。`T=131072, H_K=H_V=2, K=V=128, chunk_size=64` 的 BF16 模型形状已覆盖非对齐尾块、非空 `initial_state` 和 `initial_state=None`，未再出现 AIV timeout。
+- 该紧凑 tiling 元数据路径的单次调用容量为 1024 条序列、4096 个 chunk；更大请求需要按完整序列边界拆分，不能截断单条序列的状态传播。
 - 当前 PR 有意不验证 `V=256`。
 - `return_intermediate=True` 下的中间量导出仍需单独看护无效区、layout 和 dtype 语义。若 `h` 中间量出现无效区极值，不应直接等价为 `final_state` 错误，需要按公开输出语义和有效区逐项确认。
 

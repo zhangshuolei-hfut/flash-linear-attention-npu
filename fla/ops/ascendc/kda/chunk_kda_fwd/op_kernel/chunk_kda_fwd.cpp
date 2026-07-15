@@ -52,8 +52,6 @@ constexpr float KDA_FP16_MAX = 65504.0f;
 constexpr uint32_t EXP2_UB_ELEMENTS = 256;
 constexpr uint32_t EXP2_EVENT_ID = 0;
 constexpr uint32_t KDA_MTE2_V_EVENT_ID = 1;
-constexpr uint32_t KDA_SCALAR_MTE2_V_EVENT_ID = 2;
-constexpr uint32_t KDA_SCALAR_V_S_EVENT_ID = 3;
 constexpr uint32_t KDA_SCALAR_V_MTE3_EVENT_ID = 4;
 constexpr uint32_t KDA_SCALAR_MTE3_V_EVENT_ID = 5;
 constexpr uint32_t KDA_MTE2_MTE3_EVENT_ID = 6;
@@ -210,10 +208,10 @@ public:
         isVarLen_ = tiling.isVarLen;
         usedCoreNum_ = tiling.usedCoreNum;
         stage_ = tiling.stage;
+        chunkMap_ = tiling.chunkMap;
+        seqStart_ = tiling.seqStart;
+        seqEnd_ = tiling.seqEnd;
 
-        if (pipe_ != nullptr) {
-            pipe_->InitBuffer(scalarI64Buf_, 32);
-        }
         if (pipe_ != nullptr && initVecBuffers) {
             pipe_->InitBuffer(exp2Buf_, EXP2_UB_ELEMENTS * sizeof(float));
             pipe_->InitBuffer(vecBuf_, KDA_VEC_ARENA_ELEMENTS * sizeof(float));
@@ -415,27 +413,6 @@ private:
         CopyVectorOut(dst, offset, src, K_);
     }
 
-
-
-
-    __aicore__ inline int64_t ReadInt64(GlobalTensor<int64_t> &tensor, uint64_t offset)
-    {
-        LocalTensor<int64_t> scalarI64 = scalarI64Buf_.Get<int64_t>();
-        DataCopyParams params{1, static_cast<uint16_t>(sizeof(int64_t)), 0, 0};
-        DataCopyPadParams padParams{false, 0, 0, 0};
-        DataCopyPad(scalarI64, tensor[offset], params, padParams);
-        SetFlag<HardEvent::MTE2_V>(KDA_SCALAR_MTE2_V_EVENT_ID);
-        WaitFlag<HardEvent::MTE2_V>(KDA_SCALAR_MTE2_V_EVENT_ID);
-        SetFlag<HardEvent::V_S>(KDA_SCALAR_V_S_EVENT_ID);
-        WaitFlag<HardEvent::V_S>(KDA_SCALAR_V_S_EVENT_ID);
-        __ubuf__ int64_t *ptr = (__ubuf__ int64_t *)scalarI64.GetPhyAddr();
-        return ptr[0];
-    }
-
-    __aicore__ inline int64_t ReadMetaInt64(GlobalTensor<int64_t> &tensor, uint64_t offset)
-    {
-        return ReadInt64(tensor, offset);
-    }
 
 
 
@@ -944,6 +921,8 @@ private:
         Select(akkMat, akkMask, zeroLocal, akkMat, SELMODE::VSEL_TENSOR_TENSOR_MODE, KDA_SOLVE_BT,
                static_cast<uint8_t>(rowCount), repeatParams);
         PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
     }
 
     __aicore__ inline void PrepareAqkAkkSolveInput64(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start)
@@ -1873,39 +1852,18 @@ private:
             }
         } else {
             if (hasChunkIndices_) {
-                seq = static_cast<uint64_t>(ReadMetaInt64(chunkIndices_, flatChunk * 2));
-                uint64_t localChunk = static_cast<uint64_t>(ReadMetaInt64(chunkIndices_, flatChunk * 2 + 1));
-                uint64_t seqStart = static_cast<uint64_t>(ReadMetaInt64(cuSeqlens_, seq));
-                uint64_t seqEnd = static_cast<uint64_t>(ReadMetaInt64(cuSeqlens_, seq + 1));
+                uint32_t chunkMap = chunkMap_[flatChunk];
+                seq = chunkMap >> 16;
+                uint64_t localChunk = chunkMap & 0xFFFFu;
+                start = static_cast<uint64_t>(seqStart_[seq]) + localChunk * BT_;
+                end = start + BT_;
+                if (end > seqEnd_[seq]) {
+                    end = seqEnd_[seq];
+                }
                 b = 0;
                 chunkIdx = flatChunk;
-                start = seqStart + localChunk * BT_;
-                end = start + BT_;
-                if (end > seqEnd) {
-                    end = seqEnd;
-                }
                 h = hv / (HV_ / H_);
                 return start < end;
-            } else {
-                uint64_t remain = flatChunk;
-                for (uint64_t s = 0; s < N_; ++s) {
-                    uint64_t seqStart = static_cast<uint64_t>(ReadMetaInt64(cuSeqlens_, s));
-                    uint64_t seqEnd = static_cast<uint64_t>(ReadMetaInt64(cuSeqlens_, s + 1));
-                    uint64_t chunks = (seqEnd - seqStart + BT_ - 1) / BT_;
-                    if (remain < chunks) {
-                        seq = s;
-                        b = 0;
-                        chunkIdx = flatChunk;
-                        start = seqStart + remain * BT_;
-                        end = start + BT_;
-                        if (end > seqEnd) {
-                            end = seqEnd;
-                        }
-                        h = hv / (HV_ / H_);
-                        return start < end;
-                    }
-                    remain -= chunks;
-                }
             }
             return false;
         }
@@ -2231,7 +2189,6 @@ private:
     GlobalTensor<T> stageVNew_;
     GlobalTensor<T> stageH_;
     TPipe *pipe_ = nullptr;
-    TBuf<TPosition::VECCALC> scalarI64Buf_;
     TBuf<TPosition::VECCALC> exp2Buf_;
     TBuf<TPosition::VECCALC> vecBuf_;
     TQue<TPosition::VECIN, KDA_VEC_BUFFER_NUM> qInQue_;
@@ -2259,6 +2216,9 @@ private:
     bool isAivOnly_ = false;
     uint64_t usedCoreNum_ = 1;
     int64_t stage_ = 0;
+    const uint32_t *chunkMap_ = nullptr;
+    const uint32_t *seqStart_ = nullptr;
+    const uint32_t *seqEnd_ = nullptr;
 };
 } // namespace
 

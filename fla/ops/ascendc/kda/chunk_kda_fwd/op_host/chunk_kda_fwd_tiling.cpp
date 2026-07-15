@@ -9,6 +9,8 @@
 
 #include "chunk_kda_fwd_tiling.h"
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <register/op_impl_registry.h>
 #include "tiling/platform/platform_ascendc.h"
 
@@ -19,6 +21,7 @@ constexpr size_t INPUT_V_IDX = 2;
 constexpr size_t INPUT_GK_IDX = 3;
 constexpr size_t INPUT_INITIAL_IDX = 5;
 constexpr size_t INPUT_CU_SEQLENS_IDX = 6;
+constexpr size_t INPUT_CHUNK_INDICES_IDX = 7;
 constexpr size_t ATTR_SCALE_IDX = 0;
 constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
 constexpr size_t ATTR_OUTPUT_FINAL_STATE_IDX = 2;
@@ -75,7 +78,49 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
         auto cuTensor = context->GetOptionalInputTensor(INPUT_CU_SEQLENS_IDX);
         seqNum = cuTensor->GetStorageShape().GetDim(0) - 1;
     }
-
+    std::array<uint32_t, KDA_MAX_TILING_CHUNKS> chunkMap{};
+    std::array<uint32_t, KDA_MAX_TILING_SEQUENCES> seqStart{};
+    std::array<uint32_t, KDA_MAX_TILING_SEQUENCES> seqEnd{};
+    if (isVarLen) {
+        if (totalChunks <= 0 || totalChunks > KDA_MAX_TILING_CHUNKS ||
+            seqNum <= 0 || seqNum > KDA_MAX_TILING_SEQUENCES) {
+            return ge::GRAPH_FAILED;
+        }
+        auto cuSeqlens = context->GetOptionalInputTensor(INPUT_CU_SEQLENS_IDX);
+        auto chunkMetadata = context->GetOptionalInputTensor(INPUT_CHUNK_INDICES_IDX);
+        if (cuSeqlens == nullptr || chunkMetadata == nullptr ||
+            chunkMetadata->GetStorageShape().GetShapeSize() != totalChunks * 4) {
+            return ge::GRAPH_FAILED;
+        }
+        const int64_t *cu = cuSeqlens->GetData<int64_t>();
+        const int64_t *metadata = chunkMetadata->GetData<int64_t>();
+        if (cu == nullptr || metadata == nullptr) {
+            return ge::GRAPH_FAILED;
+        }
+        constexpr int64_t uint32Max = static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+        constexpr int64_t uint16Max = static_cast<int64_t>(std::numeric_limits<uint16_t>::max());
+        for (int64_t seq = 0; seq < seqNum; ++seq) {
+            if (cu[seq] < 0 || cu[seq] > uint32Max || cu[seq + 1] < cu[seq] || cu[seq + 1] > uint32Max) {
+                return ge::GRAPH_FAILED;
+            }
+            seqStart[seq] = static_cast<uint32_t>(cu[seq]);
+            seqEnd[seq] = static_cast<uint32_t>(cu[seq + 1]);
+        }
+        for (int64_t chunk = 0; chunk < totalChunks; ++chunk) {
+            int64_t seq = metadata[chunk * 4];
+            int64_t start = metadata[chunk * 4 + 1];
+            int64_t end = metadata[chunk * 4 + 2];
+            if (seq < 0 || seq >= seqNum || seq > uint16Max || start < cu[seq] || end <= start ||
+                end > cu[seq + 1] || (start - cu[seq]) % chunkSize != 0) {
+                return ge::GRAPH_FAILED;
+            }
+            int64_t localChunk = (start - cu[seq]) / chunkSize;
+            if (localChunk < 0 || localChunk > uint16Max) {
+                return ge::GRAPH_FAILED;
+            }
+            chunkMap[chunk] = (static_cast<uint32_t>(seq) << 16) | static_cast<uint32_t>(localChunk);
+        }
+    }
     bool hasInitialState = context->GetOptionalInputTensor(INPUT_INITIAL_IDX) != nullptr;
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -110,6 +155,9 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     tiling.set_gateDataType(DTypeCode(gDesc->GetDataType()));
     tiling.set_usedCoreNum(blockDim == 0 ? 1 : blockDim);
     tiling.set_stage(stage);
+    tiling.set_chunkMap(chunkMap.data());
+    tiling.set_seqStart(seqStart.data());
+    tiling.set_seqEnd(seqEnd.data());
 
     if (qDesc->GetDataType() == ge::DT_FLOAT) {
         context->SetTilingKey(0);
