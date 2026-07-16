@@ -81,6 +81,7 @@ constexpr uint8_t KDA_SCORE_DONE_FLAG0 = 2;
 constexpr uint8_t KDA_SCORE_DONE_FLAG1 = 3;
 constexpr uint8_t KDA_SCORE_READY_FLAG0 = 4;
 constexpr uint8_t KDA_SCORE_READY_FLAG1 = 5;
+constexpr uint32_t KDA_SCORE_REVERSE_DEPTH = 1;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 using KdaArchTag = Catlass::Arch::Ascend950;
@@ -88,8 +89,12 @@ using KdaArchTag = Catlass::Arch::Ascend950;
 using KdaArchTag = Catlass::Arch::AtlasA2;
 #endif
 using KdaDispatchPolicy = Catlass::Gemm::MmadPingpong<KdaArchTag, true, false>;
+using KdaSolveDispatchPolicy = Catlass::Gemm::MmadPingpong<KdaArchTag, true, false>;
+static_assert(!KdaSolveDispatchPolicy::USE_HF32_MODE, "KDA triangular solve must use IEEE FP32 Cube mode");
 using KdaL1TileShape = tla::Shape<_64, _128, _128>;
 using KdaL0TileShape = KdaL1TileShape;
+using KdaSolveL1TileShape = tla::Shape<_64, _64, _64>;
+using KdaSolveL0TileShape = KdaSolveL1TileShape;
 
 __aicore__ inline uint32_t FloatToBits(float value)
 {
@@ -146,7 +151,7 @@ __aicore__ inline T FloatToType(float value)
     return static_cast<T>(value);
 }
 
-template <typename T, typename OUT_T = T>
+template <typename T, typename OUT_T = T, typename AKK_T = float>
 class ChunkKdaFwdKernel {
 public:
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta, GM_ADDR initialState,
@@ -182,14 +187,14 @@ public:
         hasChunkIndices_ = chunkIndices != nullptr;
         o_.SetGlobalBuffer((__gm__ OUT_T *)o);
         finalState_.SetGlobalBuffer((__gm__ float *)finalState);
-        aqk_.SetGlobalBuffer((__gm__ T *)aqk);
-        akk_.SetGlobalBuffer((__gm__ T *)akk);
+        aqk_.SetGlobalBuffer((__gm__ float *)aqk);
+        akk_.SetGlobalBuffer((__gm__ AKK_T *)akk);
         w_.SetGlobalBuffer((__gm__ T *)w);
         u_.SetGlobalBuffer((__gm__ OUT_T *)u);
         qg_.SetGlobalBuffer((__gm__ T *)qg);
         kg_.SetGlobalBuffer((__gm__ T *)kg);
         vNew_.SetGlobalBuffer((__gm__ T *)vNew);
-        h_.SetGlobalBuffer((__gm__ T *)h);
+        h_.SetGlobalBuffer((__gm__ float *)h);
 
         B_ = tiling.batch;
         N_ = tiling.seqNum;
@@ -801,7 +806,7 @@ private:
     {
         using ElementA = T;
         using ElementB = T;
-        using ElementC = T;
+        using ElementC = float;
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::ColumnMajor;
         using LayoutTagC = Catlass::layout::RowMajor;
@@ -929,29 +934,14 @@ private:
         LocalTensor<float> maskLocal = arena[3 * KDA_SOLVE_MATRIX_ELEMENTS + KDA_SOLVE_BT + 512];
         LocalTensor<float> oneHotLocal = arena[3 * KDA_SOLVE_MATRIX_ELEMENTS + KDA_SOLVE_BT + 512 + KDA_SOLVE_BT];
 
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
-
         LoadAsFloatRow(beta_, BetaOffset(b, hv, start), betaLocal, KDA_SOLVE_BT);
         Brcb(betaBrcb, betaLocal, 8, {1, 8});
         PipeBarrier<PIPE_V>();
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopy(aqkMat, aqk_[AOffset(b, hv, start, 0)], KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(akkMat, akk_[AOffset(b, hv, start, 0)], KDA_SOLVE_MATRIX_ELEMENTS);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-        } else {
-            LocalTensor<T> typedAqk = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedAkk = typedAqk[KDA_SOLVE_MATRIX_ELEMENTS];
-            DataCopy(typedAqk, aqk_[AOffset(b, hv, start, 0)], KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(typedAkk, akk_[AOffset(b, hv, start, 0)], KDA_SOLVE_MATRIX_ELEMENTS);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(aqkMat, typedAqk, RoundMode::CAST_NONE, KDA_SOLVE_MATRIX_ELEMENTS);
-            Cast(akkMat, typedAkk, RoundMode::CAST_NONE, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-        }
+        DataCopy(aqkMat, aqk_[AOffset(b, hv, start, 0)], KDA_SOLVE_MATRIX_ELEMENTS);
+        DataCopy(akkMat, akk_[AOffset(b, hv, start, 0)], KDA_SOLVE_MATRIX_ELEMENTS);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
 
         for (uint64_t col = 0; col < KDA_SOLVE_BT; col += 8) {
             Mul(akkMat[col], akkMat[col], betaBrcb, 8, KDA_SOLVE_BT, {1, 1, 1, 8, 8, 1});
@@ -970,28 +960,12 @@ private:
             PipeBarrier<PIPE_V>();
         }
 
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(aqk_[AOffset(b, hv, start, 0)], aqkMat, KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(akk_[AOffset(b, hv, start, 0)], akkMat, KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], xMat,
-                     KDA_SOLVE_MATRIX_ELEMENTS);
-        } else {
-            LocalTensor<T> typedAqk = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedAkk = typedAqk[KDA_SOLVE_MATRIX_ELEMENTS];
-            LocalTensor<T> typedX = typedAkk[KDA_SOLVE_MATRIX_ELEMENTS];
-            Cast(typedAqk, aqkMat, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            Cast(typedAkk, akkMat, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            Cast(typedX, xMat, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(aqk_[AOffset(b, hv, start, 0)], typedAqk, KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(akk_[AOffset(b, hv, start, 0)], typedAkk, KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], typedX,
-                     KDA_SOLVE_MATRIX_ELEMENTS);
-        }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopy(aqk_[AOffset(b, hv, start, 0)], aqkMat, KDA_SOLVE_MATRIX_ELEMENTS);
+        DataCopy(akk_[AOffset(b, hv, start, 0)], akkMat, KDA_SOLVE_MATRIX_ELEMENTS);
+        DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], xMat,
+                 KDA_SOLVE_MATRIX_ELEMENTS);
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         SetFlag<HardEvent::MTE3_V>(KDA_SCALAR_MTE3_V_EVENT_ID);
@@ -1002,7 +976,8 @@ private:
                                                        uint64_t start, uint64_t curT)
     {
         uint64_t elemCount = curT * KDA_SOLVE_BT;
-        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(T)), 0, 0};
+        DataCopyParams aqkValidParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
+        DataCopyParams akkValidParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> aqkMat = arena;
@@ -1013,9 +988,6 @@ private:
         LocalTensor<float> maskLocal = arena[3 * KDA_SOLVE_MATRIX_ELEMENTS + KDA_SOLVE_BT + 512];
         LocalTensor<float> oneHotLocal = arena[3 * KDA_SOLVE_MATRIX_ELEMENTS + KDA_SOLVE_BT + 512 + KDA_SOLVE_BT];
 
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
-
         FillLocalFloat(betaLocal, 0.0f, KDA_SOLVE_BT);
         SetFlag<HardEvent::V_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::V_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1023,29 +995,17 @@ private:
         Brcb(betaBrcb, betaLocal, 8, {1, 8});
         PipeBarrier<PIPE_V>();
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopyPad(aqkMat, aqk_[AOffset(b, hv, start, 0)], validParams, padParams);
-            DataCopyPad(akkMat, akk_[AOffset(b, hv, start, 0)], validParams, padParams);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            if (elemCount < KDA_SOLVE_MATRIX_ELEMENTS) {
-                FillLocalFloat(aqkMat[elemCount], 0.0f, KDA_SOLVE_MATRIX_ELEMENTS - elemCount);
-                FillLocalFloat(akkMat[elemCount], 0.0f, KDA_SOLVE_MATRIX_ELEMENTS - elemCount);
-            }
-        } else {
-            LocalTensor<T> typedAqk = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedAkk = typedAqk[KDA_SOLVE_MATRIX_ELEMENTS];
-            DataCopyPad(typedAqk, aqk_[AOffset(b, hv, start, 0)], validParams, padParams);
-            DataCopyPad(typedAkk, akk_[AOffset(b, hv, start, 0)], validParams, padParams);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(aqkMat, typedAqk, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            Cast(akkMat, typedAkk, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-            if (elemCount < KDA_SOLVE_MATRIX_ELEMENTS) {
-                FillLocalFloat(aqkMat[elemCount], 0.0f, KDA_SOLVE_MATRIX_ELEMENTS - elemCount);
-                FillLocalFloat(akkMat[elemCount], 0.0f, KDA_SOLVE_MATRIX_ELEMENTS - elemCount);
-            }
+        DataCopyPad(aqkMat, aqk_[AOffset(b, hv, start, 0)], aqkValidParams, padParams);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        if (elemCount < KDA_SOLVE_MATRIX_ELEMENTS) {
+            FillLocalFloat(aqkMat[elemCount], 0.0f, KDA_SOLVE_MATRIX_ELEMENTS - elemCount);
+        }
+        DataCopyPad(akkMat, akk_[AOffset(b, hv, start, 0)], akkValidParams, padParams);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        if (elemCount < KDA_SOLVE_MATRIX_ELEMENTS) {
+            FillLocalFloat(akkMat[elemCount], 0.0f, KDA_SOLVE_MATRIX_ELEMENTS - elemCount);
         }
 
         for (uint64_t col = 0; col < KDA_SOLVE_BT; col += 8) {
@@ -1065,30 +1025,13 @@ private:
             PipeBarrier<PIPE_V>();
         }
 
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopyPad(aqk_[AOffset(b, hv, start, 0)], aqkMat, validParams);
-            DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], xMat,
-                     KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_Y0)], akkMat,
-                     KDA_SOLVE_MATRIX_ELEMENTS);
-        } else {
-            LocalTensor<T> typedAqk = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedAkk = typedAqk[KDA_SOLVE_MATRIX_ELEMENTS];
-            LocalTensor<T> typedX = typedAkk[KDA_SOLVE_MATRIX_ELEMENTS];
-            Cast(typedAqk, aqkMat, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
-            Cast(typedAkk, akkMat, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            Cast(typedX, xMat, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopyPad(aqk_[AOffset(b, hv, start, 0)], typedAqk, validParams);
-            DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], typedX,
-                     KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_Y0)], typedAkk,
-                     KDA_SOLVE_MATRIX_ELEMENTS);
-        }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopyPad(aqk_[AOffset(b, hv, start, 0)], aqkMat, aqkValidParams);
+        DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], xMat,
+                 KDA_SOLVE_MATRIX_ELEMENTS);
+        DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_Y0)], akkMat,
+                 KDA_SOLVE_MATRIX_ELEMENTS);
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         SetFlag<HardEvent::MTE3_V>(KDA_SCALAR_MTE3_V_EVENT_ID);
@@ -1116,7 +1059,8 @@ private:
             return;
         }
         uint64_t elemCount = rowCount * KDA_SOLVE_BT;
-        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(T)), 0, 0};
+        DataCopyParams aqkValidParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
+        DataCopyParams akkValidParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> aqkMat = arena;
@@ -1127,30 +1071,18 @@ private:
         LocalTensor<float> maskLocal = arena[3 * elemCount + KDA_SOLVE_BT + 512];
         LocalTensor<float> oneHotLocal = arena[3 * elemCount + KDA_SOLVE_BT + 512 + KDA_SOLVE_BT];
 
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
         uint64_t token = start + rowBegin;
 
         LoadAsFloatRow(beta_, BetaOffset(b, hv, token), betaLocal, rowCount);
         Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
         PipeBarrier<PIPE_V>();
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopyPad(aqkMat, aqk_[AOffset(b, hv, token, 0)], validParams, padParams);
-            DataCopyPad(akkMat, akk_[AOffset(b, hv, token, 0)], validParams, padParams);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-        } else {
-            LocalTensor<T> typedAqk = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedAkk = typedAqk[elemCount];
-            DataCopyPad(typedAqk, aqk_[AOffset(b, hv, token, 0)], validParams, padParams);
-            DataCopyPad(typedAkk, akk_[AOffset(b, hv, token, 0)], validParams, padParams);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(aqkMat, typedAqk, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            Cast(akkMat, typedAkk, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-        }
+        DataCopyPad(aqkMat, aqk_[AOffset(b, hv, token, 0)], aqkValidParams, padParams);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        DataCopyPad(akkMat, akk_[AOffset(b, hv, token, 0)], akkValidParams, padParams);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
 
         for (uint64_t col = 0; col < KDA_SOLVE_BT; col += 8) {
             Mul(akkMat[col], akkMat[col], betaBrcb, 8, static_cast<uint8_t>(rowCount), {1, 1, 1, 8, 8, 1});
@@ -1172,35 +1104,15 @@ private:
 
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X) + rowBegin * KDA_SOLVE_BT;
         uint64_t lBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_Y0) + rowBegin * KDA_SOLVE_BT;
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopyPad(aqk_[AOffset(b, hv, token, 0)], aqkMat, validParams);
-            if (storeLToAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, token, 0)], akkMat, validParams);
-            }
-            DataCopy(h_[xBase], xMat, static_cast<uint32_t>(elemCount));
-            if (storeLToScratch) {
-                DataCopy(h_[lBase], akkMat, static_cast<uint32_t>(elemCount));
-            }
-        } else {
-            LocalTensor<T> typedAqk = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedAkk = typedAqk[elemCount];
-            LocalTensor<T> typedX = typedAkk[elemCount];
-            Cast(typedAqk, aqkMat, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
-            Cast(typedAkk, akkMat, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
-            Cast(typedX, xMat, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopyPad(aqk_[AOffset(b, hv, token, 0)], typedAqk, validParams);
-            if (storeLToAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, token, 0)], typedAkk, validParams);
-            }
-            DataCopy(h_[xBase], typedX, static_cast<uint32_t>(elemCount));
-            if (storeLToScratch) {
-                DataCopy(h_[lBase], typedAkk, static_cast<uint32_t>(elemCount));
-            }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopyPad(aqk_[AOffset(b, hv, token, 0)], aqkMat, aqkValidParams);
+        if (storeLToAkk) {
+            DataCopyPad(akk_[AOffset(b, hv, token, 0)], akkMat, akkValidParams);
+        }
+        DataCopy(h_[xBase], xMat, static_cast<uint32_t>(elemCount));
+        if (storeLToScratch) {
+            DataCopy(h_[lBase], akkMat, static_cast<uint32_t>(elemCount));
         }
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1208,23 +1120,22 @@ private:
         WaitFlag<HardEvent::MTE3_V>(KDA_SCALAR_MTE3_V_EVENT_ID);
     }
 
-    __aicore__ inline void CubeGemmSolveSub(GlobalTensor<T> &tensorA, uint64_t baseA, uint64_t rowA, uint64_t colA,
-                                            GlobalTensor<T> &tensorB, uint64_t baseB, uint64_t rowB, uint64_t colB,
-                                            GlobalTensor<T> &tensorC, uint64_t baseC, uint64_t rowC, uint64_t colC,
+    __aicore__ inline void CubeGemmSolveSub(GlobalTensor<float> &tensorA, uint64_t baseA, uint64_t rowA, uint64_t colA,
+                                            GlobalTensor<float> &tensorB, uint64_t baseB, uint64_t rowB, uint64_t colB,
+                                            GlobalTensor<float> &tensorC, uint64_t baseC, uint64_t rowC, uint64_t colC,
                                             uint32_t m, uint32_t n, uint32_t k)
     {
-        using ElementA = T;
-        using ElementB = T;
-        using ElementC = T;
+        using ElementA = float;
+        using ElementB = float;
+        using ElementC = float;
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
         using LayoutTagC = Catlass::layout::RowMajor;
         using TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
                                                                 LayoutTagB, ElementC, LayoutTagC>;
-        using PostL1TileShape = tla::Shape<_128, _128, tla::_256>;
-        using PostL0TileShape = tla::Shape<_128, _128, _128>;
-        using BlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape, PostL0TileShape,
-                                                              ElementA, ElementB, ElementC, void, TileCopy>;
+        using BlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaSolveDispatchPolicy, KdaSolveL1TileShape,
+                                                              KdaSolveL0TileShape, ElementA, ElementB, ElementC,
+                                                              void, TileCopy>;
 
         Catlass::Arch::Resource<KdaArchTag> resource;
         BlockMmad blockMmad(resource);
@@ -1248,48 +1159,22 @@ private:
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> xLocal = arena;
         LocalTensor<float> tmpLocal = arena[KDA_SOLVE_MATRIX_ELEMENTS];
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X);
         uint64_t tmpBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_TMP);
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopy(xLocal, h_[xBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(tmpLocal, h_[tmpBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedTmp = typedX[KDA_SOLVE_MATRIX_ELEMENTS];
-            DataCopy(typedX, h_[xBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(typedTmp, h_[tmpBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(xLocal, typedX, RoundMode::CAST_NONE, KDA_SOLVE_MATRIX_ELEMENTS);
-            Cast(tmpLocal, typedTmp, RoundMode::CAST_NONE, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-        }
+        DataCopy(xLocal, h_[xBase], KDA_SOLVE_MATRIX_ELEMENTS);
+        DataCopy(tmpLocal, h_[tmpBase], KDA_SOLVE_MATRIX_ELEMENTS);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
 
         Add(xLocal, xLocal, tmpLocal, KDA_SOLVE_MATRIX_ELEMENTS);
         PipeBarrier<PIPE_V>();
 
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
-            if (storeAkk) {
-                DataCopy(akk_[AOffset(b, hv, start, 0)], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
-            }
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            Cast(typedX, xLocal, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], typedX, KDA_SOLVE_MATRIX_ELEMENTS);
-            if (storeAkk) {
-                DataCopy(akk_[AOffset(b, hv, start, 0)], typedX, KDA_SOLVE_MATRIX_ELEMENTS);
-            }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopy(h_[xBase], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
+        if (storeAkk) {
+            DataCopy(akk_[AOffset(b, hv, start, 0)], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
         }
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1301,52 +1186,26 @@ private:
                                               uint64_t curT, bool storeAkk)
     {
         uint64_t elemCount = curT * KDA_SOLVE_BT;
-        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(T)), 0, 0};
+        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> xLocal = arena;
         LocalTensor<float> tmpLocal = arena[KDA_SOLVE_MATRIX_ELEMENTS];
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X);
         uint64_t tmpBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_TMP);
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopy(xLocal, h_[xBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(tmpLocal, h_[tmpBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedTmp = typedX[KDA_SOLVE_MATRIX_ELEMENTS];
-            DataCopy(typedX, h_[xBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            DataCopy(typedTmp, h_[tmpBase], KDA_SOLVE_MATRIX_ELEMENTS);
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(xLocal, typedX, RoundMode::CAST_NONE, KDA_SOLVE_MATRIX_ELEMENTS);
-            Cast(tmpLocal, typedTmp, RoundMode::CAST_NONE, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-        }
+        DataCopy(xLocal, h_[xBase], KDA_SOLVE_MATRIX_ELEMENTS);
+        DataCopy(tmpLocal, h_[tmpBase], KDA_SOLVE_MATRIX_ELEMENTS);
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
 
         Add(xLocal, xLocal, tmpLocal, KDA_SOLVE_MATRIX_ELEMENTS);
         PipeBarrier<PIPE_V>();
 
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
-            if (storeAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, start, 0)], xLocal, validParams);
-            }
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            Cast(typedX, xLocal, RoundMode::CAST_RINT, KDA_SOLVE_MATRIX_ELEMENTS);
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], typedX, KDA_SOLVE_MATRIX_ELEMENTS);
-            if (storeAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, start, 0)], typedX, validParams);
-            }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopy(h_[xBase], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
+        if (storeAkk) {
+            DataCopyPad(akk_[AOffset(b, hv, start, 0)], xLocal, validParams);
         }
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1362,53 +1221,27 @@ private:
             return;
         }
         uint64_t elemCount = rowCount * KDA_SOLVE_BT;
-        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(T)), 0, 0};
+        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> xLocal = arena;
         LocalTensor<float> tmpLocal = arena[elemCount];
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X) + rowBegin * KDA_SOLVE_BT;
         uint64_t tmpBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_TMP) + rowBegin * KDA_SOLVE_BT;
         uint64_t token = start + rowBegin;
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopy(xLocal, h_[xBase], static_cast<uint32_t>(elemCount));
-            DataCopy(tmpLocal, h_[tmpBase], static_cast<uint32_t>(elemCount));
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedTmp = typedX[elemCount];
-            DataCopy(typedX, h_[xBase], static_cast<uint32_t>(elemCount));
-            DataCopy(typedTmp, h_[tmpBase], static_cast<uint32_t>(elemCount));
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(xLocal, typedX, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            Cast(tmpLocal, typedTmp, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-        }
+        DataCopy(xLocal, h_[xBase], static_cast<uint32_t>(elemCount));
+        DataCopy(tmpLocal, h_[tmpBase], static_cast<uint32_t>(elemCount));
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
 
         Add(xLocal, xLocal, tmpLocal, static_cast<uint32_t>(elemCount));
         PipeBarrier<PIPE_V>();
 
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], xLocal, static_cast<uint32_t>(elemCount));
-            if (storeAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, token, 0)], xLocal, validParams);
-            }
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            Cast(typedX, xLocal, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], typedX, static_cast<uint32_t>(elemCount));
-            if (storeAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, token, 0)], typedX, validParams);
-            }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopy(h_[xBase], xLocal, static_cast<uint32_t>(elemCount));
+        if (storeAkk) {
+            DataCopyPad(akk_[AOffset(b, hv, token, 0)], xLocal, validParams);
         }
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1424,32 +1257,18 @@ private:
             return;
         }
         uint64_t elemCount = rowCount * KDA_SOLVE_BT;
-        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(T)), 0, 0};
+        DataCopyParams validParams{1, static_cast<uint16_t>(elemCount * sizeof(float)), 0, 0};
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> xLocal = arena;
         LocalTensor<float> tmpLocal = arena[elemCount];
-        constexpr uint64_t typedOffsetFloats = 20480;
-        constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X) + rowBegin * KDA_SOLVE_BT;
         uint64_t tmpBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_TMP) + rowBegin * KDA_SOLVE_BT;
         uint64_t token = start + rowBegin;
 
-        if constexpr (IsSameType<T, float>::value) {
-            DataCopy(xLocal, h_[xBase], static_cast<uint32_t>(elemCount));
-            DataCopy(tmpLocal, h_[tmpBase], static_cast<uint32_t>(elemCount));
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            LocalTensor<T> typedTmp = typedX[elemCount];
-            DataCopy(typedX, h_[xBase], static_cast<uint32_t>(elemCount));
-            DataCopy(typedTmp, h_[tmpBase], static_cast<uint32_t>(elemCount));
-            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
-            Cast(xLocal, typedX, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            Cast(tmpLocal, typedTmp, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-        }
+        DataCopy(xLocal, h_[xBase], static_cast<uint32_t>(elemCount));
+        DataCopy(tmpLocal, h_[tmpBase], static_cast<uint32_t>(elemCount));
+        SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+        WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
 
         for (uint64_t localRow = 0; localRow < rowCount; ++localRow) {
             uint64_t row = rowBegin + localRow;
@@ -1459,23 +1278,11 @@ private:
             PipeBarrier<PIPE_V>();
         }
 
-        if constexpr (IsSameType<T, float>::value) {
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], xLocal, static_cast<uint32_t>(elemCount));
-            if (storeAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, token, 0)], xLocal, validParams);
-            }
-        } else {
-            LocalTensor<T> typedX = vecBuf_.Get<T>()[typedOffset];
-            Cast(typedX, xLocal, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
-            DataCopy(h_[xBase], typedX, static_cast<uint32_t>(elemCount));
-            if (storeAkk) {
-                DataCopyPad(akk_[AOffset(b, hv, token, 0)], typedX, validParams);
-            }
+        SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+        DataCopy(h_[xBase], xLocal, static_cast<uint32_t>(elemCount));
+        if (storeAkk) {
+            DataCopyPad(akk_[AOffset(b, hv, token, 0)], xLocal, validParams);
         }
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
         WaitFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1649,28 +1456,29 @@ private:
     __aicore__ inline void ComputePostWuCube(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
                                              uint64_t curT)
     {
-        using ElementA = T;
+        using ElementA = AKK_T;
         using ElementB = T;
-        using ElementC = T;
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
         using LayoutTagC = Catlass::layout::RowMajor;
-        using TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
-                                                                LayoutTagB, ElementC, LayoutTagC>;
+        using WTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
+                                                                 LayoutTagB, float, LayoutTagC>;
+        using UTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
+                                                                 LayoutTagB, OUT_T, LayoutTagC>;
         using PostL1TileShape = tla::Shape<_128, _128, tla::_256>;
         using PostL0TileShape = tla::Shape<_128, _128, _128>;
-        using BlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape, PostL0TileShape,
-                                                              ElementA, ElementB, ElementC, void, TileCopy>;
+        using WBlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape, PostL0TileShape,
+                                                               ElementA, ElementB, float, void, WTileCopy>;
+        using UBlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape, PostL0TileShape,
+                                                               ElementA, ElementB, OUT_T, void, UTileCopy>;
 
-        Catlass::Arch::Resource<KdaArchTag> resource;
-        BlockMmad blockMmad(resource);
         LayoutTagA tagA = LayoutTagA::template MakeLayout<ElementA>(BT_, BT_);
         auto layoutA = tla::MakeLayoutFromTag(tagA);
         auto tensorA = tla::MakeTensor(akk_[AOffset(b, hv, start, 0)], layoutA, Catlass::Arch::PositionGM{});
 
         {
             LayoutTagB tagB = LayoutTagB::template MakeLayout<ElementB>(BT_, K_);
-            LayoutTagC tagC = LayoutTagC::template MakeLayout<ElementC>(BT_, K_);
+            LayoutTagC tagC = LayoutTagC::template MakeLayout<float>(BT_, K_);
             auto layoutB = tla::MakeLayoutFromTag(tagB);
             auto layoutC = tla::MakeLayoutFromTag(tagC);
             Catlass::GemmCoord shape{static_cast<uint32_t>(curT), static_cast<uint32_t>(K_),
@@ -1682,13 +1490,15 @@ private:
             auto blockA = GetTile(tensorA, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.k()));
             auto blockB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(shape.k(), shape.n()));
             auto blockC = GetTile(tensorC, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.n()));
-            blockMmad(blockA, blockB, blockC, shape);
+            Catlass::Arch::Resource<KdaArchTag> wResource;
+            WBlockMmad wBlockMmad(wResource);
+            wBlockMmad(blockA, blockB, blockC, shape);
             PipeBarrier<PIPE_ALL>();
         }
 
         {
             LayoutTagB tagB = LayoutTagB::template MakeLayout<ElementB>(BT_, V_);
-            LayoutTagC tagC = LayoutTagC::template MakeLayout<ElementC>(BT_, V_);
+            LayoutTagC tagC = LayoutTagC::template MakeLayout<OUT_T>(BT_, V_);
             auto layoutB = tla::MakeLayoutFromTag(tagB);
             auto layoutC = tla::MakeLayoutFromTag(tagC);
             Catlass::GemmCoord shape{static_cast<uint32_t>(curT), static_cast<uint32_t>(V_),
@@ -1700,7 +1510,9 @@ private:
             auto blockA = GetTile(tensorA, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.k()));
             auto blockB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(shape.k(), shape.n()));
             auto blockC = GetTile(tensorC, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.n()));
-            blockMmad(blockA, blockB, blockC, shape);
+            Catlass::Arch::Resource<KdaArchTag> uResource;
+            UBlockMmad uBlockMmad(uResource);
+            uBlockMmad(blockA, blockB, blockC, shape);
             PipeBarrier<PIPE_ALL>();
         }
 
@@ -1719,16 +1531,19 @@ private:
         LocalTensor<float> matrixLocal = arena[matrixOffset];
         uint64_t scratchBase = WScratchOffset(b, hv, chunkIdx, 0, 0);
 
+        DataCopy(matrixLocal, h_[scratchBase], static_cast<uint32_t>(elemCount));
         if constexpr (IsSameType<T, float>::value) {
-            DataCopy(matrixLocal, h_[scratchBase], static_cast<uint32_t>(elemCount));
             SetFlag<HardEvent::MTE2_MTE3>(KDA_MTE2_MTE3_EVENT_ID);
             WaitFlag<HardEvent::MTE2_MTE3>(KDA_MTE2_MTE3_EVENT_ID);
             DataCopy(w_[KVOffset(b, hv, start, 0, K_)], matrixLocal, static_cast<uint32_t>(elemCount));
         } else {
             LocalTensor<T> matrixTyped = vecBuf_.Get<T>()[typedOffset];
-            DataCopy(matrixTyped, h_[scratchBase], static_cast<uint32_t>(elemCount));
-            SetFlag<HardEvent::MTE2_MTE3>(KDA_MTE2_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_MTE3>(KDA_MTE2_MTE3_EVENT_ID);
+            SetFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+            WaitFlag<HardEvent::MTE2_V>(KDA_MTE2_V_EVENT_ID);
+            Cast(matrixTyped, matrixLocal, RoundMode::CAST_RINT, static_cast<uint32_t>(elemCount));
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
+            WaitFlag<HardEvent::V_MTE3>(KDA_SCALAR_V_MTE3_EVENT_ID);
             DataCopy(w_[KVOffset(b, hv, start, 0, K_)], matrixTyped, static_cast<uint32_t>(elemCount));
         }
         SetFlag<HardEvent::MTE3_MTE2>(KDA_MTE3_MTE2_EVENT_ID);
@@ -1878,6 +1693,15 @@ private:
                                               uint64_t start, uint64_t end, uint64_t subBlockIdx,
                                               uint64_t subBlockNum)
     {
+        if constexpr (IsSameType<AKK_T, float>::value) {
+            ProcessChunkPreAivFp32(b, h, hv, chunkIdx, start, end, subBlockIdx, subBlockNum);
+        }
+    }
+
+    __aicore__ inline void ProcessChunkPreAivFp32(uint64_t b, uint64_t h, uint64_t hv, uint64_t chunkIdx,
+                                                  uint64_t start, uint64_t end, uint64_t subBlockIdx,
+                                                  uint64_t subBlockNum)
+    {
         uint64_t curT = end - start;
         if (curT == 0) {
             return;
@@ -1935,6 +1759,14 @@ private:
     __aicore__ inline void ProcessChunkPreAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
                                               uint64_t end)
     {
+        if constexpr (IsSameType<AKK_T, float>::value) {
+            ProcessChunkPreAicFp32(b, hv, chunkIdx, start, end);
+        }
+    }
+
+    __aicore__ inline void ProcessChunkPreAicFp32(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+                                                  uint64_t end)
+    {
         uint64_t curT = end - start;
         if (curT == 0 || K_ < 16) {
             return;
@@ -1975,6 +1807,14 @@ private:
 
     __aicore__ inline void ProcessChunkPostAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
                                                uint64_t end)
+    {
+        if constexpr (IsSameType<AKK_T, T>::value) {
+            ProcessChunkPostAicTyped(b, hv, chunkIdx, start, end);
+        }
+    }
+
+    __aicore__ inline void ProcessChunkPostAicTyped(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+                                                    uint64_t end)
     {
         uint64_t curT = end - start;
         if (curT == 0 || !UsePostWuCube(curT)) {
@@ -2178,14 +2018,14 @@ private:
     GlobalTensor<int64_t> cuSeqlens_;
     GlobalTensor<OUT_T> o_;
     GlobalTensor<float> finalState_;
-    GlobalTensor<T> aqk_;
-    GlobalTensor<T> akk_;
+    GlobalTensor<float> aqk_;
+    GlobalTensor<AKK_T> akk_;
     GlobalTensor<T> w_;
     GlobalTensor<OUT_T> u_;
     GlobalTensor<T> qg_;
     GlobalTensor<T> kg_;
     GlobalTensor<T> vNew_;
-    GlobalTensor<T> h_;
+    GlobalTensor<float> h_;
     GlobalTensor<T> stageQG_;
     GlobalTensor<T> stageAqk_;
     GlobalTensor<T> stageVNew_;
@@ -2199,8 +2039,10 @@ private:
     TQue<TPosition::VECOUT, KDA_VEC_BUFFER_NUM> qgOutQue_;
     TQue<TPosition::VECOUT, KDA_VEC_BUFFER_NUM> wOutQue_;
     TQue<TPosition::VECOUT, KDA_VEC_BUFFER_NUM> kgOutQue_;
-    Catlass::Arch::CrossCoreFlagWithReverse<> scoreReadyFlag_{KDA_SCORE_READY_FLAG0, KDA_SCORE_READY_FLAG1};
-    Catlass::Arch::CrossCoreFlagWithReverse<> scoreDoneFlag_{KDA_SCORE_DONE_FLAG0, KDA_SCORE_DONE_FLAG1};
+    Catlass::Arch::CrossCoreFlagWithReverse<KDA_SCORE_REVERSE_DEPTH> scoreReadyFlag_{KDA_SCORE_READY_FLAG0,
+                                                                                    KDA_SCORE_READY_FLAG1};
+    Catlass::Arch::CrossCoreFlagWithReverse<KDA_SCORE_REVERSE_DEPTH> scoreDoneFlag_{KDA_SCORE_DONE_FLAG0,
+                                                                                   KDA_SCORE_DONE_FLAG1};
 
     uint64_t B_ = 0;
     uint64_t N_ = 0;
@@ -2252,6 +2094,12 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd(GM_ADDR q, GM_ADDR k, GM_ADD
                             stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
                             &pipe, false);
                     op.ProcessAic();
+                } else if (tilingData.stage == 3) {
+                    ChunkKdaFwdKernel<bfloat16_t, bfloat16_t, bfloat16_t> op;
+                    op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
+                            stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
+                            &pipe, false);
+                    op.ProcessAic();
                 } else {
                     ChunkKdaFwdKernel<bfloat16_t> op;
                     op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
@@ -2263,6 +2111,12 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd(GM_ADDR q, GM_ADDR k, GM_ADD
             if ASCEND_IS_AIV {
                 if (tilingData.stage == 2) {
                     ChunkKdaFwdKernel<bfloat16_t, float> op;
+                    op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
+                            stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
+                            &pipe);
+                    op.ProcessAiv();
+                } else if (tilingData.stage == 3) {
+                    ChunkKdaFwdKernel<bfloat16_t, bfloat16_t, bfloat16_t> op;
                     op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
                             stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
                             &pipe);
@@ -2283,6 +2137,12 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd(GM_ADDR q, GM_ADDR k, GM_ADD
                             stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
                             &pipe, false);
                     op.ProcessAic();
+                } else if (tilingData.stage == 3) {
+                    ChunkKdaFwdKernel<half, half, half> op;
+                    op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
+                            stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
+                            &pipe, false);
+                    op.ProcessAic();
                 } else {
                     ChunkKdaFwdKernel<half> op;
                     op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
@@ -2294,6 +2154,12 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd(GM_ADDR q, GM_ADDR k, GM_ADD
             if ASCEND_IS_AIV {
                 if (tilingData.stage == 2) {
                     ChunkKdaFwdKernel<half, float> op;
+                    op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
+                            stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
+                            &pipe);
+                    op.ProcessAiv();
+                } else if (tilingData.stage == 3) {
+                    ChunkKdaFwdKernel<half, half, half> op;
                     op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk,
                             stage_v_new, stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData,
                             &pipe);
@@ -2310,15 +2176,29 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd(GM_ADDR q, GM_ADDR k, GM_ADD
     } else if (TILING_KEY_IS(2)) {
         KERNEL_TASK_TYPE(2, KERNEL_TYPE_AIV_ONLY);
         if (tilingData.dataType == 1) {
-            ChunkKdaFwdKernel<bfloat16_t> op;
-            op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk, stage_v_new,
-                    stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData, &pipe);
-            op.ProcessAivOnly();
+            if (tilingData.stage == 3) {
+                ChunkKdaFwdKernel<bfloat16_t, bfloat16_t, bfloat16_t> op;
+                op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk, stage_v_new,
+                        stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData, &pipe);
+                op.ProcessAivOnly();
+            } else {
+                ChunkKdaFwdKernel<bfloat16_t> op;
+                op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk, stage_v_new,
+                        stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData, &pipe);
+                op.ProcessAivOnly();
+            }
         } else {
-            ChunkKdaFwdKernel<half> op;
-            op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk, stage_v_new,
-                    stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData, &pipe);
-            op.ProcessAivOnly();
+            if (tilingData.stage == 3) {
+                ChunkKdaFwdKernel<half, half, half> op;
+                op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk, stage_v_new,
+                        stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData, &pipe);
+                op.ProcessAivOnly();
+            } else {
+                ChunkKdaFwdKernel<half> op;
+                op.Init(q, k, v, gk, beta, initial_state, cu_seqlens, chunk_indices, stage_qg, stage_aqk, stage_v_new,
+                        stage_h, o, final_state, aqk, akk, w, u, qg, kg, v_new, h, tilingData, &pipe);
+                op.ProcessAivOnly();
+            }
         }
     }
 }
