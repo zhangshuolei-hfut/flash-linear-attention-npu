@@ -42,6 +42,25 @@ using namespace op_infer;
     return std::make_tuple(std::move(dk), std::move(dv), std::move(dbeta), std::move(dg));
 }
 
+::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> npu_prepare_wy_repr_bwd(const at::Tensor & k, const at::Tensor & v, const at::Tensor & beta, const at::Tensor & A, const at::Tensor & dw, const at::Tensor & du, const at::Tensor & g, int64_t chunk_size, at::OptionalIntArrayRef cu_seqlens, at::OptionalIntArrayRef chunk_indices)
+{
+    at::Tensor dk = at::empty_like(k);
+    at::Tensor dv = at::empty_like(v);
+    at::Tensor dbeta = at::empty_like(beta);
+    at::Tensor dg = at::empty_like(g);
+
+    // 这个公开接口对应流程图中的完整反向 DAG：Python 侧不再显式传入 dA。
+    // dA 会在 ACLNN 组合算子内部按 A 的形状申请临时张量，并先由 da 子算子写入，
+    // 再作为 full 子算子的输入继续计算 dk、dv、dbeta 和 dg。
+    EXEC_NPU_CMD_EXT(
+        aclnnPrepareWyReprBwd,
+        k, v, beta, A, dw, du, g,
+        cu_seqlens, chunk_indices, chunk_size,
+        dk, dv, dbeta, dg
+    );
+    return std::make_tuple(std::move(dk), std::move(dv), std::move(dbeta), std::move(dg));
+}
+
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> npu_chunk_gated_delta_rule_bwd_dhu(
     const at::Tensor & q, 
     const at::Tensor & k, 
@@ -344,67 +363,6 @@ at::Tensor npu_chunk_fwd_o(
     return std::tie(w,u);
 }
 
-at::Tensor npu_chunk_scaled_dot_kkt(
-    const at::Tensor &k,
-    const at::Tensor &g,
-    const at::Tensor &beta,
-    at::OptionalIntArrayRef cu_seqlens,
-    at::OptionalIntArrayRef chunk_indices,
-    int64_t chunk_size)
-{
-    TORCH_CHECK(k.dim() == 4, "npu_chunk_scaled_dot_kkt: k must be [B,Hk,T,K], got ", k.sizes());
-    TORCH_CHECK(g.dim() == 3, "npu_chunk_scaled_dot_kkt: g must be [B,Hv,T], got ", g.sizes());
-    TORCH_CHECK(beta.dim() == 3, "npu_chunk_scaled_dot_kkt: beta must be [B,Hv,T], got ", beta.sizes());
-    TORCH_CHECK(
-        k.scalar_type() == c10::ScalarType::Half || k.scalar_type() == c10::ScalarType::BFloat16,
-        "npu_chunk_scaled_dot_kkt: k dtype must be float16 or bfloat16, got ", k.scalar_type());
-    TORCH_CHECK(g.scalar_type() == c10::ScalarType::Float,
-        "npu_chunk_scaled_dot_kkt: g dtype must be float32, got ", g.scalar_type());
-    TORCH_CHECK(beta.scalar_type() == c10::ScalarType::Float,
-        "npu_chunk_scaled_dot_kkt: beta dtype must be float32, got ", beta.scalar_type());
-    TORCH_CHECK(
-        chunk_size == 16 || chunk_size == 32 || chunk_size == 64 || chunk_size == 128,
-        "npu_chunk_scaled_dot_kkt: chunk_size must be one of 16, 32, 64, 128, got ", chunk_size);
-    TORCH_CHECK(
-        cu_seqlens.has_value() == chunk_indices.has_value(),
-        "npu_chunk_scaled_dot_kkt: cu_seqlens and chunk_indices must be both provided or both omitted.");
-    if (cu_seqlens.has_value()) {
-        const auto cu = cu_seqlens.value();
-        const auto chunks = chunk_indices.value();
-        TORCH_CHECK(cu.size() >= 2,
-            "npu_chunk_scaled_dot_kkt: cu_seqlens must have at least 2 elements, got ", cu.size());
-        TORCH_CHECK(chunks.size() > 0 && chunks.size() % 2 == 0,
-            "npu_chunk_scaled_dot_kkt: chunk_indices must be a non-empty flat [seq, chunk] list, got ",
-            chunks.size(), " elements.");
-    }
-
-    const int64_t B = k.size(0);
-    const int64_t Hk = k.size(1);
-    const int64_t T = k.size(2);
-    const int64_t Hv = g.size(1);
-    TORCH_CHECK(
-        g.size(0) == B && g.size(2) == T,
-        "npu_chunk_scaled_dot_kkt: g must match k B/T and provide value heads [B,Hv,T]; k=", k.sizes(), " g=", g.sizes());
-    TORCH_CHECK(
-        beta.size(0) == B && beta.size(1) == Hv && beta.size(2) == T,
-        "npu_chunk_scaled_dot_kkt: beta must match g as [B,Hv,T]; g=", g.sizes(), " beta=", beta.sizes());
-    TORCH_CHECK(
-        Hk > 0 && Hv > 0 && Hv % Hk == 0,
-        "npu_chunk_scaled_dot_kkt: GVA requires Hv divisible by Hk; Hk=", Hk, " Hv=", Hv);
-
-    at::Tensor k_contig = k.contiguous();
-    at::Tensor g_contig = g.contiguous();
-    at::Tensor beta_contig = beta.contiguous();
-    at::Tensor A = at::empty({B, Hk, T, chunk_size}, k.options().dtype(c10::ScalarType::Float));
-
-    EXEC_NPU_CMD_EXT(
-        aclnnChunkScaledDotKkt,
-        k_contig, g_contig, beta_contig, cu_seqlens, chunk_indices, chunk_size,
-        A
-    );
-    return A;
-}
-
 at::Tensor infer_y_tensor(
     const at::Tensor& x,
     int64_t head_num,
@@ -590,65 +548,6 @@ at::Tensor npu_solve_tri(
         x_out
     );
     return x_out;
-}
-
-at::Tensor npu_chunk_local_cumsum(
-    const at::Tensor &g,
-    int64_t chunk_size,
-    const c10::optional<at::Tensor> &cu_seqlens,
-    const c10::optional<at::Tensor> &chunk_indices_out,
-    bool reverse,
-    double scale,
-    bool head_first,
-    c10::string_view output_dtype)
-{
-    TORCH_CHECK(g.dim() >= 3, "npu_chunk_local_cumsum: g must be [B, H, T, *], got ", g.sizes());
-    TORCH_CHECK(g.scalar_type() == at::kFloat, "npu_chunk_local_cumsum: only float32 g is supported.");
-    TORCH_CHECK(chunk_size > 0 && (chunk_size & (chunk_size - 1)) == 0,
-                "npu_chunk_local_cumsum: chunk_size must be a positive power of two, got ", chunk_size);
-    TORCH_CHECK(head_first, "npu_chunk_local_cumsum: only head_first=true / [B, H, T, *] layout is supported.");
-
-    std::string output_dtype_str(output_dtype.data(), output_dtype.size());
-    if (output_dtype_str.empty()) {
-        output_dtype_str = "float32";
-    }
-    TORCH_CHECK(output_dtype_str == "float32" || output_dtype_str == "torch.float" ||
-                    output_dtype_str == "torch.float32",
-                "npu_chunk_local_cumsum: output_dtype only supports float32, got ", output_dtype_str);
-
-    at::Tensor g_contig = g.contiguous();
-    at::Tensor out = at::empty_like(g_contig);
-    at::Tensor empty_index = at::empty({0}, g_contig.options().dtype(at::kLong));
-
-    at::Tensor cu_seqlens_tensor = empty_index;
-    if (cu_seqlens.has_value() && cu_seqlens->defined()) {
-        cu_seqlens_tensor = cu_seqlens->contiguous();
-        TORCH_CHECK(cu_seqlens_tensor.scalar_type() == at::kLong,
-                    "npu_chunk_local_cumsum: cu_seqlens must be int64.");
-    }
-
-    at::Tensor chunk_indices_tensor = empty_index;
-    if (chunk_indices_out.has_value() && chunk_indices_out->defined()) {
-        chunk_indices_tensor = chunk_indices_out->contiguous();
-        TORCH_CHECK(chunk_indices_tensor.scalar_type() == at::kLong,
-                    "npu_chunk_local_cumsum: chunk_indices_out must be int64.");
-    }
-
-    if (cu_seqlens_tensor.numel() > 0) {
-        TORCH_CHECK(g_contig.size(0) == 1,
-                    "npu_chunk_local_cumsum: B must be 1 when cu_seqlens is provided, got ", g_contig.size(0));
-        TORCH_CHECK(chunk_indices_tensor.numel() > 0,
-                    "npu_chunk_local_cumsum: chunk_indices_out is required when cu_seqlens is provided.");
-    }
-
-    char *output_dtype_cstr = const_cast<char *>(output_dtype_str.c_str());
-    EXEC_NPU_CMD_EXT(
-        aclnnChunkLocalCumsum,
-        g_contig, cu_seqlens_tensor, chunk_indices_tensor,
-        chunk_size, reverse, scale, head_first, output_dtype_cstr,
-        out
-    );
-    return out;
 }
 
 }  // namespace op_api
