@@ -52,10 +52,6 @@ PrepareWyReprBwdKernelImpl(GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADD
                            GM_ADDR debugKbg, GM_ADDR debugVb, GM_ADDR debugKbeta, GM_ADDR debugDkbg, GM_ADDR debugDvb,
                            GM_ADDR debugKkt, GM_ADDR workspace, const PrepareWyReprBwdTilingData *tilingData)
 {
-    (void)dv;
-    (void)dbeta;
-    (void)dg;
-    (void)dk;
     if ASCEND_IS_AIC {
         ::PrepareWyReprBwdCubeProcess<KType, GType, V_DIM, CHUNK_SIZE> cubeProcess(
             k, A, dw, du, cuSeqlens, chunkIndices, workspace, debugDkbg, debugDvb, debugKkt);
@@ -65,7 +61,8 @@ PrepareWyReprBwdKernelImpl(GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADD
     if ASCEND_IS_AIV {
         AscendC::TPipe tPipe;
         ::PrepareWyReprBwdVectorProcess<KType, GType, V_DIM, CHUNK_SIZE> vectorProcess(
-            k, v, beta, g, cuSeqlens, chunkIndices, workspace, debugKbg, debugVb, debugKbeta, debugDkbg, debugDvb);
+            k, v, beta, g, cuSeqlens, chunkIndices, dk, dv, dbeta, dg, workspace, debugKbg, debugVb, debugKbeta,
+            debugDkbg, debugDvb);
         vectorProcess.Init(*tilingData, &tPipe);
         vectorProcess.Process();
     }

@@ -200,6 +200,58 @@ def npu_prepare_wy_repr_bwd_full(
     )
 
 
+def npu_prepare_wy_repr_bwd(
+    k,
+    v,
+    beta,
+    A,
+    dw,
+    du,
+    g,
+    chunk_size,
+    *,
+    cu_seqlens=None,
+    chunk_indices=None,
+):
+    dk = _empty_like(k)
+    dv = _empty_like(v)
+    dbeta = _empty_like(beta)
+    dg = _empty_like(g)
+    debug_kbg = _empty((1,), k)
+    debug_vb = _empty((1,), k)
+    debug_kbeta = _empty((1,), k)
+    debug_dkb = _empty((1,), k)
+    debug_dk = _empty((1,), k)
+    debug_kkt = _empty((1,), k)
+    outputs = (dk, dv, dbeta, dg)
+    return _call_aclnn(
+        "aclnnPrepareWyReprBwd",
+        lambda ctx: [
+            ctx.tensor(k, "k"),
+            ctx.tensor(v, "v"),
+            ctx.tensor(beta, "beta"),
+            ctx.tensor(A, "A"),
+            ctx.tensor(dw, "dw"),
+            ctx.tensor(du, "du"),
+            ctx.tensor(g, "g"),
+            ctx.int_array(cu_seqlens),
+            ctx.int_array(chunk_indices),
+            ctypes.c_int64(int(chunk_size)),
+            ctx.tensor(dk, "dk"),
+            ctx.tensor(dv, "dv"),
+            ctx.tensor(dbeta, "dbeta"),
+            ctx.tensor(dg, "dg"),
+            ctx.tensor(debug_kbg, "debug_kbg"),
+            ctx.tensor(debug_vb, "debug_vb"),
+            ctx.tensor(debug_kbeta, "debug_kbeta"),
+            ctx.tensor(debug_dkb, "debug_dkb"),
+            ctx.tensor(debug_dk, "debug_dk"),
+            ctx.tensor(debug_kkt, "debug_kkt"),
+        ],
+        outputs,
+    )
+
+
 def npu_prepare_wy_repr_bwd_stage1_debug(
     k,
     v,
