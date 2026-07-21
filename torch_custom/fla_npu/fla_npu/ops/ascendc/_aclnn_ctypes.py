@@ -275,10 +275,30 @@ def npu_prepare_wy_repr_bwd_stage2_debug(
     cu_seqlens=None,
     chunk_indices=None,
 ):
+    raise RuntimeError(
+        "prepare_wy_repr_bwd_stage2_debug is no longer maintained after stage3 landed; "
+        "use prepare_wy_repr_bwd_stage3_debug for current stage validation."
+    )
+
+
+def npu_prepare_wy_repr_bwd_stage3_debug(
+    k,
+    v,
+    beta,
+    A,
+    dw,
+    du,
+    g,
+    chunk_size,
+    *,
+    cu_seqlens=None,
+    chunk_indices=None,
+):
     k_shape = _shape(k)
     v_shape = _shape(v)
     batch_size = int(k_shape[0])
     total_tokens = int(k_shape[2])
+    key_dim = int(k_shape[3])
     value_num_heads = int(v_shape[1])
     chunk_size = int(chunk_size)
     task_num = _chunk_num(total_tokens, chunk_size, chunk_indices)
@@ -292,10 +312,10 @@ def npu_prepare_wy_repr_bwd_stage2_debug(
     debug_kbg = _empty((1,), k)
     debug_vb = _empty((1,), k)
     debug_kbeta = _empty((1,), k)
-    debug_d = _empty((task_num, value_num_heads, chunk_size, chunk_size), k)
-    debug_dvb = _empty((1,), k)
+    debug_dkb = _empty((task_num, value_num_heads, chunk_size, key_dim), k)
+    debug_dk = _empty((task_num, value_num_heads, chunk_size, key_dim), k)
     debug_kkt = _empty((1,), k)
-    outputs = (dk, dv, dbeta, dg, debug_kbg, debug_vb, debug_kbeta, debug_d, debug_dvb, debug_kkt)
+    outputs = (dk, dv, dbeta, dg, debug_kbg, debug_vb, debug_kbeta, debug_dkb, debug_dk, debug_kkt)
     return _call_aclnn(
         "aclnnPrepareWyReprBwd",
         lambda ctx: [
@@ -316,8 +336,8 @@ def npu_prepare_wy_repr_bwd_stage2_debug(
             ctx.tensor(debug_kbg, "debug_kbg"),
             ctx.tensor(debug_vb, "debug_vb"),
             ctx.tensor(debug_kbeta, "debug_kbeta"),
-            ctx.tensor(debug_d, "debug_d"),
-            ctx.tensor(debug_dvb, "debug_dvb"),
+            ctx.tensor(debug_dkb, "debug_dkb"),
+            ctx.tensor(debug_dk, "debug_dk"),
             ctx.tensor(debug_kkt, "debug_kkt"),
         ],
         outputs,

@@ -33,6 +33,7 @@ _ASCENDC_OPS = (
     "npu_prepare_wy_repr_bwd_full",
     "npu_prepare_wy_repr_bwd_stage1_debug",
     "npu_prepare_wy_repr_bwd_stage2_debug",
+    "npu_prepare_wy_repr_bwd_stage3_debug",
     "npu_chunk_gated_delta_rule_bwd_dhu",
     "npu_chunk_bwd_dv_local",
     "npu_prepare_wy_repr_bwd_da",
