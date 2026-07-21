@@ -53,11 +53,16 @@ private:
     using LayoutTagKT = layout::ColumnMajor;
     using LayoutTagKbgT = layout::ColumnMajor;
     using LayoutTagVbT = layout::ColumnMajor;
+    using LayoutTagA = layout::RowMajor;
     using LayoutTagDkbg = layout::RowMajor;
     using LayoutTagDvb = layout::RowMajor;
     using LayoutTagKkt = layout::RowMajor;
     using LayoutTagDA1 = layout::RowMajor;
     using LayoutTagDA2 = layout::RowMajor;
+    using LayoutTagDA4 = layout::RowMajor;
+    using LayoutTagDA5 = layout::RowMajor;
+    using LayoutTagDA5T = layout::ColumnMajor;
+    using LayoutTagDA6T = layout::RowMajor;
 
     using TileCopyDkbg =
         Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagAT, kType, LayoutTagDw, kType, LayoutTagDkbg>;
@@ -69,6 +74,10 @@ private:
         Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDw, kType, LayoutTagKbgT, kType, LayoutTagDA1>;
     using TileCopyDA2 =
         Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDu, kType, LayoutTagVbT, kType, LayoutTagDA2>;
+    using TileCopyDA5 =
+        Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDA4, kType, LayoutTagAT, kType, LayoutTagDA5>;
+    using TileCopyDA6T =
+        Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDA5T, kType, LayoutTagA, kType, LayoutTagDA6T>;
 
     using ElementAccumulator = typename TileCopyDkbg::ElementAccumulator;
     using CopyL1ToL0A_Dkbg = typename TileCopyDkbg::CopyL1ToL0A;
@@ -81,6 +90,10 @@ private:
     using CopyL1ToL0B_DA1 = typename TileCopyDA1::CopyL1ToL0B;
     using CopyL1ToL0A_DA2 = typename TileCopyDA2::CopyL1ToL0A;
     using CopyL1ToL0B_DA2 = typename TileCopyDA2::CopyL1ToL0B;
+    using CopyL1ToL0A_DA5 = typename TileCopyDA5::CopyL1ToL0A;
+    using CopyL1ToL0B_DA5 = typename TileCopyDA5::CopyL1ToL0B;
+    using CopyL1ToL0A_DA6T = typename TileCopyDA6T::CopyL1ToL0A;
+    using CopyL1ToL0B_DA6T = typename TileCopyDA6T::CopyL1ToL0B;
 
     using LayoutTagL1A_Dkbg = typename TileCopyDkbg::LayoutTagL1A;
     using LayoutTagL1B_Dkbg = typename TileCopyDkbg::LayoutTagL1B;
@@ -102,12 +115,22 @@ private:
     using LayoutTagL1B_DA2 = typename TileCopyDA2::LayoutTagL1B;
     using LayoutTagL0A_DA2 = typename TileCopyDA2::LayoutTagL0A;
     using LayoutTagL0B_DA2 = typename TileCopyDA2::LayoutTagL0B;
+    using LayoutTagL1A_DA5 = typename TileCopyDA5::LayoutTagL1A;
+    using LayoutTagL1B_DA5 = typename TileCopyDA5::LayoutTagL1B;
+    using LayoutTagL0A_DA5 = typename TileCopyDA5::LayoutTagL0A;
+    using LayoutTagL0B_DA5 = typename TileCopyDA5::LayoutTagL0B;
+    using LayoutTagL1A_DA6T = typename TileCopyDA6T::LayoutTagL1A;
+    using LayoutTagL1B_DA6T = typename TileCopyDA6T::LayoutTagL1B;
+    using LayoutTagL0A_DA6T = typename TileCopyDA6T::LayoutTagL0A;
+    using LayoutTagL0B_DA6T = typename TileCopyDA6T::LayoutTagL0B;
 
     using TileMmadDkbg = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_Dkbg>;
     using TileMmadDvb = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_Dvb>;
     using TileMmadKkt = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_Kkt>;
     using TileMmadDA1 = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_DA1>;
     using TileMmadDA2 = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_DA2>;
+    using TileMmadDA5 = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_DA5>;
+    using TileMmadDA6T = Gemm::Tile::TileMmadTla<ArchTag, kType, LayoutTagL1A_DA6T>;
 
     template <typename Tensor>
     using CopyGmToL1A_Dkbg = typename TileCopyDkbg::template CopyGmToL1A<Tensor>;
@@ -137,6 +160,18 @@ private:
     using CopyGmToL1B_DA2 = typename TileCopyDA2::template CopyGmToL1B<Tensor>;
     template <typename Tensor>
     using CopyL0CToGm_DA2 = typename TileCopyDA2::template CopyL0CToGm<Tensor>;
+    template <typename Tensor>
+    using CopyGmToL1A_DA5 = typename TileCopyDA5::template CopyGmToL1A<Tensor>;
+    template <typename Tensor>
+    using CopyGmToL1B_DA5 = typename TileCopyDA5::template CopyGmToL1B<Tensor>;
+    template <typename Tensor>
+    using CopyL0CToGm_DA5 = typename TileCopyDA5::template CopyL0CToGm<Tensor>;
+    template <typename Tensor>
+    using CopyGmToL1A_DA6T = typename TileCopyDA6T::template CopyGmToL1A<Tensor>;
+    template <typename Tensor>
+    using CopyGmToL1B_DA6T = typename TileCopyDA6T::template CopyGmToL1B<Tensor>;
+    template <typename Tensor>
+    using CopyL0CToGm_DA6T = typename TileCopyDA6T::template CopyL0CToGm<Tensor>;
 
     static constexpr auto L1A_LAYOUT_AT =
         tla::MakeLayout<kType, LayoutTagL1A_Dkbg>(tla::Int<CHUNK_SIZE>{}, tla::Int<CHUNK_SIZE>{});
@@ -158,6 +193,14 @@ private:
         tla::MakeLayout<kType, LayoutTagL1A_DA2>(tla::Int<CHUNK_SIZE>{}, tla::Int<V_DIM>{});
     static constexpr auto L1B_LAYOUT_VB_T =
         tla::MakeLayout<kType, LayoutTagL1B_DA2>(tla::Int<V_DIM>{}, tla::Int<CHUNK_SIZE>{});
+    static constexpr auto L1A_LAYOUT_DA4 =
+        tla::MakeLayout<kType, LayoutTagL1A_DA5>(tla::Int<CHUNK_SIZE>{}, tla::Int<CHUNK_SIZE>{});
+    static constexpr auto L1B_LAYOUT_AT_FOR_DA5 =
+        tla::MakeLayout<kType, LayoutTagL1B_DA5>(tla::Int<CHUNK_SIZE>{}, tla::Int<CHUNK_SIZE>{});
+    static constexpr auto L1A_LAYOUT_DA5_T =
+        tla::MakeLayout<kType, LayoutTagL1A_DA6T>(tla::Int<CHUNK_SIZE>{}, tla::Int<CHUNK_SIZE>{});
+    static constexpr auto L1B_LAYOUT_A_FOR_DA6T =
+        tla::MakeLayout<kType, LayoutTagL1B_DA6T>(tla::Int<CHUNK_SIZE>{}, tla::Int<CHUNK_SIZE>{});
 
     static constexpr uint32_t L1_SCRATCH_BUFFER_COUNT = 2;
     static constexpr uint32_t L1_SCRATCH_K_TILE_BYTES = CHUNK_SIZE * K_DIM * sizeof(kType);
@@ -201,6 +244,7 @@ private:
     static constexpr int32_t EVENT_L0_READY_PING = 0;
     static constexpr int32_t EVENT_L0_READY_PONG = 1;
     static constexpr int32_t EVENT_L0C = 0;
+    static constexpr int32_t EVENT_FIX_TO_MTE2 = 1;
 
     GM_ADDR k_ = nullptr;
     GM_ADDR A_ = nullptr;
@@ -290,11 +334,16 @@ __aicore__ inline void PrepareWyReprBwdCubeProcess<kType, gType, V_DIM, CHUNK_SI
     LayoutTagK tagK = LayoutTagK::MakeLayout<kType>(CHUNK_SIZE, K_DIM);
     LayoutTagKbgT tagKbgT = LayoutTagKbgT::MakeLayout<kType>(K_DIM, CHUNK_SIZE);
     LayoutTagVbT tagVbT = LayoutTagVbT::MakeLayout<kType>(V_DIM, CHUNK_SIZE);
+    LayoutTagA tagA = LayoutTagA::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
     LayoutTagDkbg tagDkbg = LayoutTagDkbg::MakeLayout<kType>(CHUNK_SIZE, K_DIM);
     LayoutTagDvb tagDvb = LayoutTagDvb::MakeLayout<kType>(CHUNK_SIZE, V_DIM);
     LayoutTagKkt tagKkt = LayoutTagKkt::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
     LayoutTagDA1 tagDA1 = LayoutTagDA1::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
     LayoutTagDA2 tagDA2 = LayoutTagDA2::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
+    LayoutTagDA4 tagDA4 = LayoutTagDA4::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
+    LayoutTagDA5 tagDA5 = LayoutTagDA5::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
+    LayoutTagDA5T tagDA5T = LayoutTagDA5T::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
+    LayoutTagDA6T tagDA6T = LayoutTagDA6T::MakeLayout<kType>(CHUNK_SIZE, CHUNK_SIZE);
 
     auto layoutAT = MakeLayoutFromTag(tagAT);
     auto layoutDw = MakeLayoutFromTag(tagDw);
@@ -302,11 +351,16 @@ __aicore__ inline void PrepareWyReprBwdCubeProcess<kType, gType, V_DIM, CHUNK_SI
     auto layoutK = MakeLayoutFromTag(tagK);
     auto layoutKbgT = MakeLayoutFromTag(tagKbgT);
     auto layoutVbT = MakeLayoutFromTag(tagVbT);
+    auto layoutA = MakeLayoutFromTag(tagA);
     auto layoutDkbg = MakeLayoutFromTag(tagDkbg);
     auto layoutDvb = MakeLayoutFromTag(tagDvb);
     auto layoutKkt = MakeLayoutFromTag(tagKkt);
     auto layoutDA1 = MakeLayoutFromTag(tagDA1);
     auto layoutDA2 = MakeLayoutFromTag(tagDA2);
+    auto layoutDA4 = MakeLayoutFromTag(tagDA4);
+    auto layoutDA5 = MakeLayoutFromTag(tagDA5);
+    auto layoutDA5T = MakeLayoutFromTag(tagDA5T);
+    auto layoutDA6T = MakeLayoutFromTag(tagDA6T);
 
     Arch::Resource<ArchTag> resource;
     AscendC::LocalTensor<kType> l1Scratch[L1_SCRATCH_BUFFER_COUNT] = {
@@ -339,13 +393,20 @@ __aicore__ inline void PrepareWyReprBwdCubeProcess<kType, gType, V_DIM, CHUNK_SI
     CopyL1ToL0B_DA1 copyL1ToL0B_DA1;
     CopyL1ToL0A_DA2 copyL1ToL0A_DA2;
     CopyL1ToL0B_DA2 copyL1ToL0B_DA2;
+    CopyL1ToL0A_DA5 copyL1ToL0A_DA5;
+    CopyL1ToL0B_DA5 copyL1ToL0B_DA5;
+    CopyL1ToL0A_DA6T copyL1ToL0A_DA6T;
+    CopyL1ToL0B_DA6T copyL1ToL0B_DA6T;
     TileMmadDkbg tileMmadDkbg;
     TileMmadDvb tileMmadDvb;
     TileMmadKkt tileMmadKkt;
     TileMmadDA1 tileMmadDA1;
     TileMmadDA2 tileMmadDA2;
+    TileMmadDA5 tileMmadDA5;
+    TileMmadDA6T tileMmadDA6T;
 
     AscendC::GlobalTensor<kType> gmAT;
+    AscendC::GlobalTensor<kType> gmA;
     AscendC::GlobalTensor<kType> gmDw;
     AscendC::GlobalTensor<kType> gmDu;
     AscendC::GlobalTensor<kType> gmK;
@@ -356,6 +417,9 @@ __aicore__ inline void PrepareWyReprBwdCubeProcess<kType, gType, V_DIM, CHUNK_SI
     AscendC::GlobalTensor<kType> gmKkt;
     AscendC::GlobalTensor<kType> gmDA1;
     AscendC::GlobalTensor<kType> gmDA2;
+    AscendC::GlobalTensor<kType> gmDA4;
+    AscendC::GlobalTensor<kType> gmDA5;
+    AscendC::GlobalTensor<kType> gmDA6T;
 
     uint32_t coreIdx = AscendC::GetBlockIdx();
     uint32_t coreNum = AscendC::GetBlockNum();
@@ -369,6 +433,7 @@ __aicore__ inline void PrepareWyReprBwdCubeProcess<kType, gType, V_DIM, CHUNK_SI
         GemmCoord shapeKkt{task.curChunkSize, task.curChunkSize, K_DIM};
         GemmCoord shapeDA1{task.curChunkSize, task.curChunkSize, K_DIM};
         GemmCoord shapeDA2{task.curChunkSize, task.curChunkSize, V_DIM};
+        GemmCoord shapeM{task.curChunkSize, task.curChunkSize, task.curChunkSize};
         nextKResidentSlot_ = 0;
         cachedKResidentSlot_ = 0;
         cachedKResidentHk_ = static_cast<uint64_t>(-1);
@@ -801,6 +866,170 @@ __aicore__ inline void PrepareWyReprBwdCubeProcess<kType, gType, V_DIM, CHUNK_SI
 
                 AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_L0C);
                 copyL0CToGm_DA2(blockDA2, tensorL0C_DA2, fixpipeUnitFlag);
+                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
+                Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(cubeToVecFlag_);
+                curSlot_ ^= 1U;
+            }
+
+            curSlot_ = windowStartSlot;
+            for (uint32_t headIdx = 0; headIdx < headCnt; ++headIdx) {
+                uint64_t hv = hvBase + headIdx;
+                uint64_t valueBase = hv * tiling_.T + task.valueBos;
+                GM_ADDR slotBase = PrepareWyReprBwdGetSlotBase(workspace_, coreIdx, curSlot_, tiling_);
+
+                gmAT.SetGlobalBuffer((__gm__ kType *)A_ + valueBase * CHUNK_SIZE);
+                gmA.SetGlobalBuffer((__gm__ kType *)A_ + valueBase * CHUNK_SIZE);
+                gmDA4.SetGlobalBuffer((__gm__ kType *)(slotBase + tiling_.da4Offset));
+                gmDA5.SetGlobalBuffer((__gm__ kType *)(slotBase + tiling_.da5Offset));
+                gmDA6T.SetGlobalBuffer((__gm__ kType *)(slotBase + tiling_.da6Offset));
+
+                auto tensorATForDA5 = tla::MakeTensor(gmAT, layoutAT, Arch::PositionGM{});
+                auto tensorAForDA6T = tla::MakeTensor(gmA, layoutA, Arch::PositionGM{});
+                auto tensorDA4 = tla::MakeTensor(gmDA4, layoutDA4, Arch::PositionGM{});
+                auto tensorDA5 = tla::MakeTensor(gmDA5, layoutDA5, Arch::PositionGM{});
+                auto tensorDA5T = tla::MakeTensor(gmDA5, layoutDA5T, Arch::PositionGM{});
+                auto tensorDA6T = tla::MakeTensor(gmDA6T, layoutDA6T, Arch::PositionGM{});
+                uint8_t fixpipeUnitFlag = 0b11;
+
+                auto blockDA4 =
+                    GetTile(tensorDA4, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.m(), shapeM.k()));
+                auto blockATForDA5 =
+                    GetTile(tensorATForDA5, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.k(), shapeM.n()));
+                auto blockDA5 =
+                    GetTile(tensorDA5, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.m(), shapeM.n()));
+                auto blockDA5T =
+                    GetTile(tensorDA5T, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.m(), shapeM.k()));
+                auto blockAForDA6T =
+                    GetTile(tensorAForDA6T, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.k(), shapeM.n()));
+                auto blockDA6T =
+                    GetTile(tensorDA6T, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.m(), shapeM.n()));
+
+                CopyGmToL1A_DA5<decltype(blockDA4)> copyGmToL1A_DA4;
+                CopyGmToL1B_DA5<decltype(blockATForDA5)> copyGmToL1B_ATForDA5;
+                CopyL0CToGm_DA5<decltype(blockDA5)> copyL0CToGm_DA5;
+                CopyGmToL1A_DA6T<decltype(blockDA5T)> copyGmToL1A_DA5T;
+                CopyGmToL1B_DA6T<decltype(blockAForDA6T)> copyGmToL1B_AForDA6T;
+                CopyL0CToGm_DA6T<decltype(blockDA6T)> copyL0CToGm_DA6T;
+
+                Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(vecToCubeFlag_);
+
+                uint32_t da5L1AIdx = curL1_;
+                uint32_t da5L1BIdx = curL1_ ^ 1U;
+                int32_t da5L1AEvent = da5L1AIdx == 0 ? EVENT_L1_SCRATCH_PING : EVENT_L1_SCRATCH_PONG;
+                int32_t da5L1BEvent = da5L1BIdx == 0 ? EVENT_L1_SCRATCH_PING : EVENT_L1_SCRATCH_PONG;
+                auto tensorL1A_DA4 = tla::MakeTensor(l1Scratch[da5L1AIdx], L1A_LAYOUT_DA4, Arch::PositionL1{});
+                auto tensorL1B_ATForDA5 =
+                    tla::MakeTensor(l1Scratch[da5L1BIdx], L1B_LAYOUT_AT_FOR_DA5, Arch::PositionL1{});
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(da5L1AEvent);
+                copyGmToL1A_DA4(tensorL1A_DA4, blockDA4);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(da5L1AEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(da5L1BEvent);
+                copyGmToL1B_ATForDA5(tensorL1B_ATForDA5, blockATForDA5);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(da5L1BEvent);
+
+                uint32_t mActualDA5 = shapeM.m();
+                if (mActualDA5 == 1) {
+                    mActualDA5 = 16;
+                }
+                uint32_t da5L0Idx = curL0_;
+                int32_t da5L0AEvent = da5L0Idx == 0 ? EVENT_L0A_PING : EVENT_L0A_PONG;
+                int32_t da5L0BEvent = da5L0Idx == 0 ? EVENT_L0B_PING : EVENT_L0B_PONG;
+                int32_t da5L0ReadyEvent = da5L0Idx == 0 ? EVENT_L0_READY_PING : EVENT_L0_READY_PONG;
+                auto layoutL0A_DA4 = tla::MakeLayout<kType, LayoutTagL0A_DA5>(mActualDA5, shapeM.k());
+                auto tensorL0A_DA4 = tla::MakeTensor(l0A[da5L0Idx], layoutL0A_DA4, Arch::PositionL0A{});
+                auto tensorTileL1A_DA4 =
+                    GetTile(tensorL1A_DA4, tla::MakeCoord(0, 0), tla::MakeShape(mActualDA5, shapeM.k()));
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(da5L1AEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(da5L0AEvent);
+                copyL1ToL0A_DA5(tensorL0A_DA4, tensorTileL1A_DA4);
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(da5L1AEvent);
+
+                auto layoutL0B_ATForDA5 = tla::MakeLayout<kType, LayoutTagL0B_DA5>(shapeM.k(), shapeM.n());
+                auto tensorL0B_ATForDA5 =
+                    tla::MakeTensor(l0B[da5L0Idx], layoutL0B_ATForDA5, Arch::PositionL0B{});
+                auto tensorTileL1B_ATForDA5 =
+                    GetTile(tensorL1B_ATForDA5, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.k(), shapeM.n()));
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(da5L1BEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(da5L0BEvent);
+                copyL1ToL0B_DA5(tensorL0B_ATForDA5, tensorTileL1B_ATForDA5);
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(da5L1BEvent);
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(da5L0ReadyEvent);
+                curL0_ ^= 1U;
+
+                auto layoutL0C_DA5 = tla::MakeLayoutL0C(mActualDA5, shapeM.n());
+                auto tensorL0C_DA5 = tla::MakeTensor(l0C, layoutL0C_DA5, Arch::PositionL0C{});
+                auto tensorTileL0C_DA5 =
+                    GetTile(tensorL0C_DA5, tla::MakeCoord(0, 0), tla::MakeShape(mActualDA5, shapeM.n()));
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(da5L0ReadyEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
+                tileMmadDA5(tensorTileL0C_DA5, tensorL0A_DA4, tensorL0B_ATForDA5, true, 0b11);
+                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(da5L0AEvent);
+                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(da5L0BEvent);
+                AscendC::SetFlag<AscendC::HardEvent::M_FIX>(EVENT_L0C);
+                AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_L0C);
+                copyL0CToGm_DA5(blockDA5, tensorL0C_DA5, fixpipeUnitFlag);
+                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
+                AscendC::SetFlag<AscendC::HardEvent::FIX_MTE2>(EVENT_FIX_TO_MTE2);
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_MTE2>(EVENT_FIX_TO_MTE2);
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
+                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
+
+                uint32_t da6L1AIdx = da5L1AIdx;
+                uint32_t da6L1BIdx = da5L1BIdx;
+                int32_t da6L1AEvent = da6L1AIdx == 0 ? EVENT_L1_SCRATCH_PING : EVENT_L1_SCRATCH_PONG;
+                int32_t da6L1BEvent = da6L1BIdx == 0 ? EVENT_L1_SCRATCH_PING : EVENT_L1_SCRATCH_PONG;
+                auto tensorL1A_DA5T =
+                    tla::MakeTensor(l1Scratch[da6L1AIdx], L1A_LAYOUT_DA5_T, Arch::PositionL1{});
+                auto tensorL1B_AForDA6T =
+                    tla::MakeTensor(l1Scratch[da6L1BIdx], L1B_LAYOUT_A_FOR_DA6T, Arch::PositionL1{});
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(da6L1AEvent);
+                copyGmToL1A_DA5T(tensorL1A_DA5T, blockDA5T);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(da6L1AEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(da6L1BEvent);
+                copyGmToL1B_AForDA6T(tensorL1B_AForDA6T, blockAForDA6T);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(da6L1BEvent);
+
+                uint32_t mActualDA6T = shapeM.m();
+                if (mActualDA6T == 1) {
+                    mActualDA6T = 16;
+                }
+                uint32_t da6L0Idx = curL0_;
+                int32_t da6L0AEvent = da6L0Idx == 0 ? EVENT_L0A_PING : EVENT_L0A_PONG;
+                int32_t da6L0BEvent = da6L0Idx == 0 ? EVENT_L0B_PING : EVENT_L0B_PONG;
+                int32_t da6L0ReadyEvent = da6L0Idx == 0 ? EVENT_L0_READY_PING : EVENT_L0_READY_PONG;
+                auto layoutL0A_DA5T = tla::MakeLayout<kType, LayoutTagL0A_DA6T>(mActualDA6T, shapeM.k());
+                auto tensorL0A_DA5T = tla::MakeTensor(l0A[da6L0Idx], layoutL0A_DA5T, Arch::PositionL0A{});
+                auto tensorTileL1A_DA5T =
+                    GetTile(tensorL1A_DA5T, tla::MakeCoord(0, 0), tla::MakeShape(mActualDA6T, shapeM.k()));
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(da6L1AEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(da6L0AEvent);
+                copyL1ToL0A_DA6T(tensorL0A_DA5T, tensorTileL1A_DA5T);
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(da6L1AEvent);
+
+                auto layoutL0B_AForDA6T = tla::MakeLayout<kType, LayoutTagL0B_DA6T>(shapeM.k(), shapeM.n());
+                auto tensorL0B_AForDA6T =
+                    tla::MakeTensor(l0B[da6L0Idx], layoutL0B_AForDA6T, Arch::PositionL0B{});
+                auto tensorTileL1B_AForDA6T =
+                    GetTile(tensorL1B_AForDA6T, tla::MakeCoord(0, 0), tla::MakeShape(shapeM.k(), shapeM.n()));
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(da6L1BEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(da6L0BEvent);
+                copyL1ToL0B_DA6T(tensorL0B_AForDA6T, tensorTileL1B_AForDA6T);
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(da6L1BEvent);
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(da6L0ReadyEvent);
+                curL0_ ^= 1U;
+
+                auto layoutL0C_DA6T = tla::MakeLayoutL0C(mActualDA6T, shapeM.n());
+                auto tensorL0C_DA6T = tla::MakeTensor(l0C, layoutL0C_DA6T, Arch::PositionL0C{});
+                auto tensorTileL0C_DA6T =
+                    GetTile(tensorL0C_DA6T, tla::MakeCoord(0, 0), tla::MakeShape(mActualDA6T, shapeM.n()));
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(da6L0ReadyEvent);
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
+                tileMmadDA6T(tensorTileL0C_DA6T, tensorL0A_DA5T, tensorL0B_AForDA6T, true, 0b11);
+                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(da6L0AEvent);
+                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(da6L0BEvent);
+                AscendC::SetFlag<AscendC::HardEvent::M_FIX>(EVENT_L0C);
+                AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_L0C);
+                copyL0CToGm_DA6T(blockDA6T, tensorL0C_DA6T, fixpipeUnitFlag);
                 AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_L0C);
                 Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(cubeToVecFlag_);
                 curSlot_ ^= 1U;
