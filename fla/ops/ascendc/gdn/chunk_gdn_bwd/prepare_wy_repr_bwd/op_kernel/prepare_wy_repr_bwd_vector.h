@@ -34,19 +34,21 @@ public:
 
 private:
     template <typename copyType, bool USE_DATA_COPY_PAD>
-    __aicore__ inline void CopyInRows(AscendC::GlobalTensor<copyType> &inputTensor,
-                                      AscendC::LocalTensor<copyType> dstTensor, uint64_t inputOffset,
-                                      uint32_t elements);
+    __aicore__ inline uint32_t CopyInRows(AscendC::GlobalTensor<copyType> &inputTensor,
+                                          AscendC::LocalTensor<copyType> dstTensor, uint64_t inputOffset,
+                                          uint32_t elements);
     template <typename copyType>
     __aicore__ inline void CastInputRows(AscendC::LocalTensor<float32_t> dstTensor,
-                                         AscendC::LocalTensor<copyType> srcTensor, uint32_t elements);
+                                         AscendC::LocalTensor<copyType> srcTensor, uint32_t elements,
+                                         uint32_t inputIdx);
     template <typename copyType, bool USE_DATA_COPY_PAD>
-    __aicore__ inline void CopyInBetaGRows(AscendC::GlobalTensor<copyType> &inputTensor,
-                                           AscendC::LocalTensor<copyType> dstTensor, uint64_t inputOffset,
-                                           uint32_t elements);
+    __aicore__ inline uint32_t CopyInBetaGRows(AscendC::GlobalTensor<copyType> &inputTensor,
+                                               AscendC::LocalTensor<copyType> dstTensor, uint64_t inputOffset,
+                                               uint32_t elements);
     template <typename copyType>
     __aicore__ inline void CastBetaGInputRows(AscendC::LocalTensor<float32_t> dstTensor,
-                                              AscendC::LocalTensor<copyType> srcTensor, uint32_t elements);
+                                              AscendC::LocalTensor<copyType> srcTensor, uint32_t elements,
+                                              uint32_t betaGInputIdx);
     __aicore__ inline void InitVectorEvents();
     __aicore__ inline void ReleaseVectorEvents();
     __aicore__ inline void SetBetaGResidentTensors(uint32_t slot);
@@ -180,7 +182,13 @@ private:
     uint32_t rowOffset_ = 0;
     uint32_t colOffset_ = 0;
     uint32_t inputIdx_ = 0;
+    uint32_t inputIdxA_ = 0;
+    uint32_t inputIdxB_ = 0;
+    uint32_t inputIdxC_ = 0;
+    uint32_t inputIdxD_ = 0;
     uint32_t betaGInputIdx_ = 0;
+    uint32_t betaGInputIdxA_ = 0;
+    uint32_t betaGInputIdxB_ = 0;
     uint32_t outputIdx_ = 0;
     uint32_t eventIdx_ = 0;
     uint8_t repeatStride_ = 0;
@@ -321,7 +329,7 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
 
 template <typename kType, typename gType, uint32_t V_DIM, uint32_t CHUNK_SIZE>
 template <typename copyType, bool USE_DATA_COPY_PAD>
-__aicore__ inline void
+__aicore__ inline uint32_t
 PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::CopyInRows(AscendC::GlobalTensor<copyType> &inputTensor,
                                                                            AscendC::LocalTensor<copyType> dstTensor,
                                                                            uint64_t inputOffset, uint32_t elements)
@@ -335,27 +343,29 @@ PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::CopyInRows(Ascen
         DataCopy(dstTensor, inputTensor[inputOffset], elements);
     }
     AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToVEvent_[inputIdx_]);
+    curInputPingPong_ ^= 1U;
+    return inputIdx_;
 }
 
 template <typename kType, typename gType, uint32_t V_DIM, uint32_t CHUNK_SIZE>
 template <typename copyType>
 __aicore__ inline void
 PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::CastInputRows(
-    AscendC::LocalTensor<float32_t> dstTensor, AscendC::LocalTensor<copyType> srcTensor, uint32_t elements)
+    AscendC::LocalTensor<float32_t> dstTensor, AscendC::LocalTensor<copyType> srcTensor, uint32_t elements,
+    uint32_t inputIdx)
 {
-    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToVEvent_[inputIdx_]);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToVEvent_[inputIdx]);
     if constexpr (std::is_same<copyType, float32_t>::value) {
         Adds(dstTensor, srcTensor, 0.0f, elements);
     } else {
         Cast(dstTensor, srcTensor, RoundMode::CAST_NONE, elements);
     }
-    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(vToMte2Event_[inputIdx_]);
-    curInputPingPong_ ^= 1U;
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(vToMte2Event_[inputIdx]);
 }
 
 template <typename kType, typename gType, uint32_t V_DIM, uint32_t CHUNK_SIZE>
 template <typename copyType, bool USE_DATA_COPY_PAD>
-__aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::CopyInBetaGRows(
+__aicore__ inline uint32_t PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::CopyInBetaGRows(
     AscendC::GlobalTensor<copyType> &inputTensor, AscendC::LocalTensor<copyType> dstTensor, uint64_t inputOffset,
     uint32_t elements)
 {
@@ -368,22 +378,24 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         DataCopy(dstTensor, inputTensor[inputOffset], elements);
     }
     AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(betaGMte2ToVEvent_[betaGInputIdx_]);
+    curBetaGInputPingPong_ ^= 1U;
+    return betaGInputIdx_;
 }
 
 template <typename kType, typename gType, uint32_t V_DIM, uint32_t CHUNK_SIZE>
 template <typename copyType>
 __aicore__ inline void
 PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::CastBetaGInputRows(
-    AscendC::LocalTensor<float32_t> dstTensor, AscendC::LocalTensor<copyType> srcTensor, uint32_t elements)
+    AscendC::LocalTensor<float32_t> dstTensor, AscendC::LocalTensor<copyType> srcTensor, uint32_t elements,
+    uint32_t betaGInputIdx)
 {
-    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(betaGMte2ToVEvent_[betaGInputIdx_]);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(betaGMte2ToVEvent_[betaGInputIdx]);
     if constexpr (std::is_same<copyType, float32_t>::value) {
         Adds(dstTensor, srcTensor, 0.0f, elements);
     } else {
         Cast(dstTensor, srcTensor, RoundMode::CAST_NONE, elements);
     }
-    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(betaGVToMte2Event_[betaGInputIdx_]);
-    curBetaGInputPingPong_ ^= 1U;
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(betaGVToMte2Event_[betaGInputIdx]);
 }
 
 template <typename kType, typename gType, uint32_t V_DIM, uint32_t CHUNK_SIZE>
@@ -472,11 +484,15 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
     debugLineBase_ =
         (static_cast<uint64_t>(taskIdx) * static_cast<uint64_t>(tiling_.HV) + hv) * static_cast<uint64_t>(CHUNK_SIZE);
 
-    CopyInBetaGRows<gType, true>(betaTensor_, betaGInputBuf_[curBetaGInputPingPong_], valueBase_,
-                                 task.curChunkSize);
-    CastBetaGInputRows<gType>(betaAllFp32Tensor_, betaGInputBuf_[betaGInputIdx_], task.curChunkSize);
-    CopyInBetaGRows<gType, true>(gTensor_, betaGInputBuf_[curBetaGInputPingPong_], valueBase_, task.curChunkSize);
-    CastBetaGInputRows<gType>(gRawAllFp32Tensor_, betaGInputBuf_[betaGInputIdx_], task.curChunkSize);
+    betaGInputIdxA_ =
+        CopyInBetaGRows<gType, true>(betaTensor_, betaGInputBuf_[curBetaGInputPingPong_], valueBase_,
+                                     task.curChunkSize);
+    betaGInputIdxB_ =
+        CopyInBetaGRows<gType, true>(gTensor_, betaGInputBuf_[curBetaGInputPingPong_], valueBase_, task.curChunkSize);
+    CastBetaGInputRows<gType>(betaAllFp32Tensor_, betaGInputBuf_[betaGInputIdxA_], task.curChunkSize,
+                              betaGInputIdxA_);
+    CastBetaGInputRows<gType>(gRawAllFp32Tensor_, betaGInputBuf_[betaGInputIdxB_], task.curChunkSize,
+                              betaGInputIdxB_);
     PipeBarrier<PIPE_V>();
     Adds(gExpAllFp32Tensor_, gRawAllFp32Tensor_, 0.0f, task.curChunkSize);
     PipeBarrier<PIPE_V>();
@@ -494,9 +510,9 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
                       task.curChunkSize - rowOffset_ :
                       static_cast<uint32_t>(tiling_.kVecRow);
 
-        CopyInRows<kType, false>(kTensor_, matrixInputBuf_[curInputPingPong_], (keyBase_ + rowOffset_) * K_DIM,
-                                  curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+        inputIdx_ = CopyInRows<kType, false>(kTensor_, matrixInputBuf_[curInputPingPong_],
+                                             (keyBase_ + rowOffset_) * K_DIM, curRow_ * K_DIM);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM, inputIdx_);
         PipeBarrier<PIPE_V>();
         Mul(scaleFp32Tensor_, betaAllFp32Tensor_[rowOffset_], gExpAllFp32Tensor_[rowOffset_], curRow_);
         PipeBarrier<PIPE_V>();
@@ -534,9 +550,9 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
                       task.curChunkSize - rowOffset_ :
                       static_cast<uint32_t>(tiling_.vVecRow);
 
-        CopyInRows<kType, false>(vTensor_, matrixInputBuf_[curInputPingPong_], (valueBase_ + rowOffset_) * V_DIM,
-                                  curRow_ * V_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * V_DIM);
+        inputIdx_ = CopyInRows<kType, false>(vTensor_, matrixInputBuf_[curInputPingPong_],
+                                             (valueBase_ + rowOffset_) * V_DIM, curRow_ * V_DIM);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * V_DIM, inputIdx_);
         PipeBarrier<PIPE_V>();
         Brcb(brcbFp32Tensor_, betaAllFp32Tensor_[rowOffset_],
              static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)), {1, 8});
@@ -580,12 +596,12 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
                       task.curChunkSize - rowOffset_ :
                       static_cast<uint32_t>(tiling_.mVecRow);
 
-        CopyInRows<kType, false>(gmDA1_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
-                                  curRow_ * CHUNK_SIZE);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * CHUNK_SIZE);
-        CopyInRows<kType, false>(gmDA2_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
-                                  curRow_ * CHUNK_SIZE);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * CHUNK_SIZE);
+        inputIdxA_ = CopyInRows<kType, false>(gmDA1_, matrixInputBuf_[curInputPingPong_],
+                                              rowOffset_ * CHUNK_SIZE, curRow_ * CHUNK_SIZE);
+        inputIdxB_ = CopyInRows<kType, false>(gmDA2_, matrixInputBuf_[curInputPingPong_],
+                                              rowOffset_ * CHUNK_SIZE, curRow_ * CHUNK_SIZE);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdxA_], curRow_ * CHUNK_SIZE, inputIdxA_);
+        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdxB_], curRow_ * CHUNK_SIZE, inputIdxB_);
         PipeBarrier<PIPE_V>();
         Add(calcFp32BTensor_, calcFp32ATensor_, calcFp32BTensor_, curRow_ * CHUNK_SIZE);
         PipeBarrier<PIPE_V>();
@@ -634,9 +650,9 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
                       task.curChunkSize - rowOffset_ :
                       static_cast<uint32_t>(tiling_.mVecRow);
 
-        CopyInRows<kType, false>(gmDA6T_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
-                                  curRow_ * CHUNK_SIZE);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * CHUNK_SIZE);
+        inputIdx_ = CopyInRows<kType, false>(gmDA6T_, matrixInputBuf_[curInputPingPong_],
+                                             rowOffset_ * CHUNK_SIZE, curRow_ * CHUNK_SIZE);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * CHUNK_SIZE, inputIdx_);
         PipeBarrier<PIPE_V>();
 
         repeatStride_ = CHUNK_SIZE * sizeof(float32_t) / PRONE_BLOCK_BYTES_32;
@@ -728,11 +744,12 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         curRow_ = rowOffset_ + rowOwned > task.curChunkSize ? task.curChunkSize - rowOffset_ : rowOwned;
         repeatStride_ = K_DIM * sizeof(float32_t) / PRONE_BLOCK_BYTES_32;
 
-        CopyInRows<kType, false>(kTensor_, matrixInputBuf_[curInputPingPong_], (keyBase_ + rowOffset_) * K_DIM,
-                                  curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
-        CopyInRows<kType, false>(gmDkb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+        inputIdxA_ = CopyInRows<kType, false>(kTensor_, matrixInputBuf_[curInputPingPong_],
+                                              (keyBase_ + rowOffset_) * K_DIM, curRow_ * K_DIM);
+        inputIdxB_ =
+            CopyInRows<kType, false>(gmDkb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdxA_], curRow_ * K_DIM, inputIdxA_);
+        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdxB_], curRow_ * K_DIM, inputIdxB_);
         PipeBarrier<PIPE_V>();
         Mul(calcFp32CTensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
@@ -746,6 +763,8 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         Add(dbetaAccFp32Tensor_[rowOffset_], dbetaAccFp32Tensor_[rowOffset_], scaleFp32Tensor_, curRow_);
         PipeBarrier<PIPE_V>();
 
+        inputIdxC_ =
+            CopyInRows<kType, false>(gmDkbg_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
         Brcb(brcbFp32Tensor_, betaAllFp32Tensor_[rowOffset_], static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
              {1, 8});
         PipeBarrier<PIPE_V>();
@@ -755,8 +774,7 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         }
         PipeBarrier<PIPE_V>();
 
-        CopyInRows<kType, false>(gmDkbg_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32CTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+        CastInputRows<kType>(calcFp32CTensor_, matrixInputBuf_[inputIdxC_], curRow_ * K_DIM, inputIdxC_);
         PipeBarrier<PIPE_V>();
         Brcb(brcbFp32Tensor_, gExpAllFp32Tensor_[rowOffset_],
              static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
@@ -769,6 +787,12 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         PipeBarrier<PIPE_V>();
         Mul(calcFp32ATensor_, calcFp32CTensor_, calcFp32ATensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
+        inputIdxC_ =
+            CopyInRows<kType, false>(gmDK_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
+        if (!isFirstValueHeadInGroup) {
+            inputIdxD_ = CopyInRows<kType, false>(dkTensor_, matrixInputBuf_[curInputPingPong_],
+                                                  (keyBase_ + rowOffset_) * K_DIM, curRow_ * K_DIM);
+        }
         for (uint32_t row = 0; row < curRow_; ++row) {
             WholeReduceSum(brcbFp32Tensor_[row * fp32PerBlock], calcFp32ATensor_[row * K_DIM],
                            PREPARE_WY_REPR_BWD_FP32_PER_REPEAT, wholeReduceKCnt, 1, 1, 8);
@@ -781,8 +805,7 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         PipeBarrier<PIPE_V>();
         Add(dgAccFp32Tensor_[rowOffset_], dgAccFp32Tensor_[rowOffset_], scaleFp32Tensor_, curRow_);
 
-        CopyInRows<kType, false>(gmDK_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdxC_], curRow_ * K_DIM, inputIdxC_);
         PipeBarrier<PIPE_V>();
         Brcb(brcbFp32Tensor_, betaAllFp32Tensor_[rowOffset_], static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
              {1, 8});
@@ -797,9 +820,7 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         Add(calcFp32ATensor_, calcFp32ATensor_, calcFp32CTensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
         if (!isFirstValueHeadInGroup) {
-            CopyInRows<kType, false>(dkTensor_, matrixInputBuf_[curInputPingPong_],
-                                      (keyBase_ + rowOffset_) * K_DIM, curRow_ * K_DIM);
-            CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+            CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdxD_], curRow_ * K_DIM, inputIdxD_);
             PipeBarrier<PIPE_V>();
             Add(calcFp32ATensor_, calcFp32ATensor_, calcFp32BTensor_, curRow_ * K_DIM);
             PipeBarrier<PIPE_V>();
@@ -812,11 +833,12 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         curRow_ = rowOffset_ + rowOwned > task.curChunkSize ? task.curChunkSize - rowOffset_ : rowOwned;
         repeatStride_ = V_DIM * sizeof(float32_t) / PRONE_BLOCK_BYTES_32;
 
-        CopyInRows<kType, false>(gmDvb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * V_DIM, curRow_ * V_DIM);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * V_DIM);
-        CopyInRows<kType, false>(vTensor_, matrixInputBuf_[curInputPingPong_], (valueBase_ + rowOffset_) * V_DIM,
-                                  curRow_ * V_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * V_DIM);
+        inputIdxA_ =
+            CopyInRows<kType, false>(gmDvb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * V_DIM, curRow_ * V_DIM);
+        inputIdxB_ = CopyInRows<kType, false>(vTensor_, matrixInputBuf_[curInputPingPong_],
+                                              (valueBase_ + rowOffset_) * V_DIM, curRow_ * V_DIM);
+        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdxA_], curRow_ * V_DIM, inputIdxA_);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdxB_], curRow_ * V_DIM, inputIdxB_);
         PipeBarrier<PIPE_V>();
         Mul(calcFp32ATensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * V_DIM);
         PipeBarrier<PIPE_V>();
@@ -845,12 +867,12 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         curRow_ = rowOffset_ + rowOwned > task.curChunkSize ? task.curChunkSize - rowOffset_ : rowOwned;
         repeatStride_ = CHUNK_SIZE * sizeof(float32_t) / PRONE_BLOCK_BYTES_32;
 
-        CopyInRows<kType, false>(gmD_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
-                                  curRow_ * CHUNK_SIZE);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * CHUNK_SIZE);
-        CopyInRows<kType, false>(gmKKT_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
-                                  curRow_ * CHUNK_SIZE);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * CHUNK_SIZE);
+        inputIdxA_ = CopyInRows<kType, false>(gmD_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
+                                              curRow_ * CHUNK_SIZE);
+        inputIdxB_ = CopyInRows<kType, false>(gmKKT_, matrixInputBuf_[curInputPingPong_], rowOffset_ * CHUNK_SIZE,
+                                              curRow_ * CHUNK_SIZE);
+        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdxA_], curRow_ * CHUNK_SIZE, inputIdxA_);
+        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdxB_], curRow_ * CHUNK_SIZE, inputIdxB_);
         PipeBarrier<PIPE_V>();
         Mul(calcFp32ATensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * CHUNK_SIZE);
         PipeBarrier<PIPE_V>();
@@ -886,12 +908,12 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         PipeBarrier<PIPE_V>();
         for (uint32_t srcOffset = 0; srcOffset < task.curChunkSize; srcOffset += rowOwned) {
             uint32_t curSrcRow = srcOffset + rowOwned > task.curChunkSize ? task.curChunkSize - srcOffset : rowOwned;
-            CopyInRows<kType, false>(gmD_, matrixInputBuf_[curInputPingPong_], srcOffset * CHUNK_SIZE,
-                                      curSrcRow * CHUNK_SIZE);
-            CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curSrcRow * CHUNK_SIZE);
-            CopyInRows<kType, false>(gmKKT_, matrixInputBuf_[curInputPingPong_], srcOffset * CHUNK_SIZE,
-                                      curSrcRow * CHUNK_SIZE);
-            CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curSrcRow * CHUNK_SIZE);
+            inputIdxA_ = CopyInRows<kType, false>(gmD_, matrixInputBuf_[curInputPingPong_], srcOffset * CHUNK_SIZE,
+                                                  curSrcRow * CHUNK_SIZE);
+            inputIdxB_ = CopyInRows<kType, false>(gmKKT_, matrixInputBuf_[curInputPingPong_], srcOffset * CHUNK_SIZE,
+                                                  curSrcRow * CHUNK_SIZE);
+            CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdxA_], curSrcRow * CHUNK_SIZE, inputIdxA_);
+            CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdxB_], curSrcRow * CHUNK_SIZE, inputIdxB_);
             PipeBarrier<PIPE_V>();
             Mul(calcFp32ATensor_, calcFp32BTensor_, calcFp32ATensor_, curSrcRow * CHUNK_SIZE);
             PipeBarrier<PIPE_V>();
