@@ -120,6 +120,7 @@ private:
     AscendC::TBuf<AscendC::TPosition::VECCALC> brcbFp32_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> calcFp32A_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> calcFp32B_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> calcFp32C_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> gRawAllFp32_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> gExpAllFp32_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> betaAllFp32_;
@@ -138,6 +139,7 @@ private:
     AscendC::LocalTensor<float32_t> brcbFp32Tensor_;
     AscendC::LocalTensor<float32_t> calcFp32ATensor_;
     AscendC::LocalTensor<float32_t> calcFp32BTensor_;
+    AscendC::LocalTensor<float32_t> calcFp32CTensor_;
     AscendC::LocalTensor<float32_t> gRawAllFp32Tensor_;
     AscendC::LocalTensor<float32_t> gExpAllFp32Tensor_;
     AscendC::LocalTensor<float32_t> betaAllFp32Tensor_;
@@ -235,6 +237,7 @@ PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_SIZE>::Init(const GDN::
     pipe_->InitBuffer(brcbFp32_, Align32(maxRow * PRONE_BLOCK_BYTES_32));
     pipe_->InitBuffer(calcFp32A_, 2 * UB_BYTES_16K);
     pipe_->InitBuffer(calcFp32B_, 2 * UB_BYTES_16K);
+    pipe_->InitBuffer(calcFp32C_, 2 * UB_BYTES_16K);
     pipe_->InitBuffer(gRawAllFp32_,
                       BUFFER_COUNT_2 *
                           Align32(CHUNK_SIZE * sizeof(float32_t)));
@@ -686,6 +689,7 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
     brcbFp32Tensor_ = brcbFp32_.Get<float32_t>();
     calcFp32ATensor_ = calcFp32A_.Get<float32_t>();
     calcFp32BTensor_ = calcFp32B_.Get<float32_t>();
+    calcFp32CTensor_ = calcFp32C_.Get<float32_t>();
     SetBetaGResidentTensors(curSlot_);
     dbetaAccFp32Tensor_ = dbetaAccFp32_.Get<float32_t>();
     dgAccFp32Tensor_ = dgAccFp32_.Get<float32_t>();
@@ -724,28 +728,25 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         curRow_ = rowOffset_ + rowOwned > task.curChunkSize ? task.curChunkSize - rowOffset_ : rowOwned;
         repeatStride_ = K_DIM * sizeof(float32_t) / PRONE_BLOCK_BYTES_32;
 
-        CopyInRows<kType, false>(gmDkb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
         CopyInRows<kType, false>(kTensor_, matrixInputBuf_[curInputPingPong_], (keyBase_ + rowOffset_) * K_DIM,
                                   curRow_ * K_DIM);
         CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+        CopyInRows<kType, false>(gmDkb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
+        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
-        Mul(calcFp32ATensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
+        Mul(calcFp32CTensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
         for (uint32_t row = 0; row < curRow_; ++row) {
-            WholeReduceSum(brcbFp32Tensor_[row * fp32PerBlock], calcFp32ATensor_[row * K_DIM],
+            WholeReduceSum(brcbFp32Tensor_[row * fp32PerBlock], calcFp32CTensor_[row * K_DIM],
                            PREPARE_WY_REPR_BWD_FP32_PER_REPEAT, wholeReduceKCnt, 1, 1, 8);
         }
         PipeBarrier<PIPE_V>();
         WholeReduceSum(scaleFp32Tensor_, brcbFp32Tensor_, wholeReduceKCnt, curRow_, 1, 1, 1);
         PipeBarrier<PIPE_V>();
         Add(dbetaAccFp32Tensor_[rowOffset_], dbetaAccFp32Tensor_[rowOffset_], scaleFp32Tensor_, curRow_);
-
-        CopyInRows<kType, false>(gmDkbg_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
-        Brcb(brcbFp32Tensor_, gExpAllFp32Tensor_[rowOffset_],
-             static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
+
+        Brcb(brcbFp32Tensor_, betaAllFp32Tensor_[rowOffset_], static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
              {1, 8});
         PipeBarrier<PIPE_V>();
         for (colOffset_ = 0; colOffset_ < K_DIM; colOffset_ += PREPARE_WY_REPR_BWD_FP32_PER_REPEAT) {
@@ -753,11 +754,20 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
                 PREPARE_WY_REPR_BWD_FP32_PER_REPEAT, curRow_, {1, 1, 0, repeatStride_, repeatStride_, 1});
         }
         PipeBarrier<PIPE_V>();
-        CopyInRows<kType, false>(kTensor_, matrixInputBuf_[curInputPingPong_], (keyBase_ + rowOffset_) * K_DIM,
-                                  curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+
+        CopyInRows<kType, false>(gmDkbg_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
+        CastInputRows<kType>(calcFp32CTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
-        Mul(calcFp32ATensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
+        Brcb(brcbFp32Tensor_, gExpAllFp32Tensor_[rowOffset_],
+             static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
+             {1, 8});
+        PipeBarrier<PIPE_V>();
+        for (colOffset_ = 0; colOffset_ < K_DIM; colOffset_ += PREPARE_WY_REPR_BWD_FP32_PER_REPEAT) {
+            Mul(calcFp32CTensor_[colOffset_], calcFp32CTensor_[colOffset_], brcbFp32Tensor_,
+                PREPARE_WY_REPR_BWD_FP32_PER_REPEAT, curRow_, {1, 1, 0, repeatStride_, repeatStride_, 1});
+        }
+        PipeBarrier<PIPE_V>();
+        Mul(calcFp32ATensor_, calcFp32CTensor_, calcFp32ATensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
         for (uint32_t row = 0; row < curRow_; ++row) {
             WholeReduceSum(brcbFp32Tensor_[row * fp32PerBlock], calcFp32ATensor_[row * K_DIM],
@@ -772,44 +782,29 @@ __aicore__ inline void PrepareWyReprBwdVectorProcess<kType, gType, V_DIM, CHUNK_
         Add(dgAccFp32Tensor_[rowOffset_], dgAccFp32Tensor_[rowOffset_], scaleFp32Tensor_, curRow_);
 
         CopyInRows<kType, false>(gmDK_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
-        CopyInRows<kType, false>(gmDkb_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
         CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
         Brcb(brcbFp32Tensor_, betaAllFp32Tensor_[rowOffset_], static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)),
              {1, 8});
         PipeBarrier<PIPE_V>();
         for (colOffset_ = 0; colOffset_ < K_DIM; colOffset_ += PREPARE_WY_REPR_BWD_FP32_PER_REPEAT) {
-            Mul(calcFp32ATensor_[colOffset_], calcFp32ATensor_[colOffset_], brcbFp32Tensor_,
+            Mul(calcFp32CTensor_[colOffset_], calcFp32CTensor_[colOffset_], brcbFp32Tensor_,
                 PREPARE_WY_REPR_BWD_FP32_PER_REPEAT, curRow_, {1, 1, 0, repeatStride_, repeatStride_, 1});
         }
         PipeBarrier<PIPE_V>();
-        Add(calcFp32BTensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
+        Add(calcFp32ATensor_, calcFp32ATensor_, calcFp32BTensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
-
-        CopyInRows<kType, false>(gmDkbg_, matrixInputBuf_[curInputPingPong_], rowOffset_ * K_DIM, curRow_ * K_DIM);
-        CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
-        PipeBarrier<PIPE_V>();
-        Mul(scaleFp32Tensor_, betaAllFp32Tensor_[rowOffset_], gExpAllFp32Tensor_[rowOffset_], curRow_);
-        PipeBarrier<PIPE_V>();
-        Brcb(brcbFp32Tensor_, scaleFp32Tensor_, static_cast<uint8_t>(PrepareWyReprBwdCeilDiv(curRow_, 8)), {1, 8});
-        PipeBarrier<PIPE_V>();
-        for (colOffset_ = 0; colOffset_ < K_DIM; colOffset_ += PREPARE_WY_REPR_BWD_FP32_PER_REPEAT) {
-            Mul(calcFp32ATensor_[colOffset_], calcFp32ATensor_[colOffset_], brcbFp32Tensor_,
-                PREPARE_WY_REPR_BWD_FP32_PER_REPEAT, curRow_, {1, 1, 0, repeatStride_, repeatStride_, 1});
-        }
-        PipeBarrier<PIPE_V>();
-        Add(calcFp32BTensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
+        Add(calcFp32ATensor_, calcFp32ATensor_, calcFp32CTensor_, curRow_ * K_DIM);
         PipeBarrier<PIPE_V>();
         if (!isFirstValueHeadInGroup) {
             CopyInRows<kType, false>(dkTensor_, matrixInputBuf_[curInputPingPong_],
                                       (keyBase_ + rowOffset_) * K_DIM, curRow_ * K_DIM);
-            CastInputRows<kType>(calcFp32ATensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
+            CastInputRows<kType>(calcFp32BTensor_, matrixInputBuf_[inputIdx_], curRow_ * K_DIM);
             PipeBarrier<PIPE_V>();
-            Add(calcFp32BTensor_, calcFp32BTensor_, calcFp32ATensor_, curRow_ * K_DIM);
+            Add(calcFp32ATensor_, calcFp32ATensor_, calcFp32BTensor_, curRow_ * K_DIM);
             PipeBarrier<PIPE_V>();
         }
-        CastOutputRows(calcFp32BTensor_, curRow_ * K_DIM);
+        CastOutputRows(calcFp32ATensor_, curRow_ * K_DIM);
         CopyOutRows(dkTensor_, outputBuf_[outputIdx_], (keyBase_ + rowOffset_) * K_DIM, curRow_ * K_DIM);
     }
 
