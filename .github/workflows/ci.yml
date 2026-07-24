@@ -1,3 +1,13 @@
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2026 Tianjin University, Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
 name: NPU CI
 
 on:
@@ -301,6 +311,12 @@ jobs:
       CI_MODE: ${{ needs.prepare.outputs.ci_mode }}
       CI_OPS: ${{ needs.prepare.outputs.ops }}
       CI_RUN_EXAMPLE_ST: 'true'
+      CI_RUN_STANDALONE_WHEEL_LAYOUT_CHECK: 'true'
+      CI_RUN_SCOPED_WHEEL_INSTALL_CHECK: 'true'
+      CI_ACCURACY_REPORT_FILE: .ci-tmp/gdr_accuracy_report.json
+      CI_ACCURACY_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      CI_ACCURACY_RUN_ID: ${{ github.run_id }}
+      CI_ACCURACY_RUN_ATTEMPT: ${{ github.run_attempt }}
       CI_IMAGE: fla-npu-ci:8.5.0-910b
     steps:
       - name: 拉取当前目标分支代码（第 1 次）
@@ -415,7 +431,7 @@ jobs:
         timeout-minutes: 10
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: refs/heads/${{ needs.prepare.outputs.base_ref }}
           fetch-depth: 1
           path: trusted-ci
 
@@ -432,7 +448,7 @@ jobs:
         timeout-minutes: 10
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: refs/heads/${{ needs.prepare.outputs.base_ref }}
           fetch-depth: 1
           path: trusted-ci
 
@@ -447,13 +463,14 @@ jobs:
         timeout-minutes: 10
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: refs/heads/${{ needs.prepare.outputs.base_ref }}
           fetch-depth: 1
           path: trusted-ci
 
       - name: 使用可信 CI 脚本
         run: |
-          # CI 执行脚本必须来自默认分支，避免 PR 修改脚本后影响 runner。
+          # CI 执行脚本必须来自 PR 目标分支，避免 PR 修改脚本后影响 runner，
+          # 同时保证维护分支使用与自身代码匹配的 CI 规则。
           # 但 Example/ST 用例配置属于被验证内容：新 PR 中新增或修改的 enabled 用例
           # 必须跟随当前目标分支和 PR head 的现场合并结果一起进入容器，并被 /run-npu-ci quick 实际执行验证。
           tmp_cases="$(mktemp)"
@@ -581,7 +598,8 @@ jobs:
             }
             const state = staleRun ? 'failure' : jobState;
             const staleDescription = `PR head 已变化，本次结果失效`;
-            const accuracyReportPath = 'repo/output/gdr_accuracy_report.json';
+            const accuracyReportPath = `repo/${process.env.CI_ACCURACY_REPORT_FILE || 'output/gdr_accuracy_report.json'}`;
+            const expectedRunId = String(context.runId);
             const formatValue = (value) => {
               if (typeof value === 'number') {
                 return Number.isFinite(value) ? value.toExponential(3) : String(value);
@@ -611,6 +629,13 @@ jobs:
               if (!accuracyReport || !accuracyReport.summary) {
                 return { state: 'failure', description: '精度报告未生成' };
               }
+              const metadata = accuracyReport.metadata || {};
+              if (!metadata.head_sha || !metadata.run_id) {
+                return { state: 'failure', description: '精度报告缺少本次触发标签' };
+              }
+              if (metadata.head_sha !== sha || String(metadata.run_id) !== expectedRunId) {
+                return { state: 'failure', description: '精度报告不属于本次触发' };
+              }
               const summary = accuracyReport.summary;
               const total = Number(summary.accuracy_total || 0);
               const passed = Number(summary.accuracy_passed || 0);
@@ -637,10 +662,12 @@ jobs:
                 return lines;
               }
               const summary = report.summary;
+              const metadata = report.metadata || {};
               lines.push(
                 `精度用例：通过 ${summary.accuracy_passed || 0}/${summary.accuracy_total || 0}，` +
                   `失败 ${summary.accuracy_failed || 0}，未执行 ${summary.accuracy_not_run || 0}。`
               );
+              lines.push(`报告标签：commit \`${metadata.head_sha || '-'}\`，run \`${metadata.run_id || '-'}\`。`);
               lines.push('');
               lines.push('| 用例 | Tensor | 结果 | tol | cosine | cos_min | max_abs | mean_abs | rmse | bad_frac | golden |');
               lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
