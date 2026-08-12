@@ -1,19 +1,20 @@
 # -----------------------------------------------------------------------------------------------------------
-# Copyright (c) 2025 Huawei Technologies Co., Ltd.
-# Adapted for flash-linear-attention-npu by Tianjin University.
+# Copyright (c) 2026 Tianjin University, Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # -----------------------------------------------------------------------------------------------------------
-
-if (UT_TEST_ALL OR OP_KERNEL_UT)
-    # 算子自己的tiling文件路径
-    set(recurrent_gated_delta_rule_files
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../../op_host/recurrent_gated_delta_rule_tiling.cpp
+add_op_to_compiled_list()
+if (BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnnExc PRIVATE
+        chunk_kda_fwd_def.cpp
     )
-
-    AddOpTestCase(recurrent_gated_delta_rule "Ascend910B1" "" "${recurrent_gated_delta_rule_files}")
-
 endif()
+
+add_modules_sources(OPTYPE chunk_kda_fwd ACLNNTYPE aclnn_exclude)
+add_ops_compile_options(
+    OP_NAME ChunkKdaFwd
+    OPTIONS --cce-auto-sync=off
+            -Wno-deprecated-declarations
+)
