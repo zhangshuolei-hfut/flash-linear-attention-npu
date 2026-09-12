@@ -19,7 +19,7 @@ def role_for_atk_task(
     node_name: str,
     is_benchmark_task: bool,
 ) -> str:
-    """按 ATK 自动 CPU golden 与两个命名 NPU node 映射三路角色。"""
+    """映射本地 NPU 双节点或远端 GPU 双标杆拓扑的三路角色。"""
 
     device = str(device).strip().lower()
     node_name = str(node_name).strip()
@@ -30,6 +30,8 @@ def role_for_atk_task(
                 f"name={node_name!r} is_benchmark_task={is_benchmark_task}"
             )
         return "golden"
+    if device == "gpu":
+        return "golden" if is_benchmark_task else "benchmark"
     if device != "npu" or is_benchmark_task:
         raise RuntimeError(
             "无法识别 ATK 双标杆任务："

@@ -174,18 +174,21 @@ def _compute_cumsum_and_a(
     g_compute = g.to(compute_dtype)
     beta_compute = beta.to(compute_dtype)
     g_cumsum = torch.zeros(
-        (case.batch, case.tokens, case.v_heads), dtype=compute_dtype
+        (case.batch, case.tokens, case.v_heads), dtype=compute_dtype, device=k.device
     )
     a = torch.zeros(
         (case.batch, case.v_heads, case.tokens, case.chunk_size),
         dtype=compute_dtype,
+        device=k.device,
     )
     head_ratio = case.v_heads // case.k_heads
 
     for batch_index, _sequence, begin, end in chunk_ranges(case):
         valid = end - begin
-        eye = torch.eye(valid, dtype=compute_dtype)
-        lower = torch.tril(torch.ones((valid, valid), dtype=torch.bool), diagonal=-1)
+        eye = torch.eye(valid, dtype=compute_dtype, device=k.device)
+        lower = torch.tril(
+            torch.ones((valid, valid), dtype=torch.bool, device=k.device), diagonal=-1
+        )
         for value_head in range(case.v_heads):
             key_head = value_head // head_ratio
             gate = torch.cumsum(
@@ -223,10 +226,12 @@ def _compute_recurrent_outputs(
     output = torch.zeros(
         (case.batch, case.v_heads, case.tokens, case.value_dim),
         dtype=compute_dtype,
+        device=q.device,
     )
     final_state = torch.zeros(
         (case.sequence_count, case.v_heads, case.key_dim, case.value_dim),
         dtype=compute_dtype,
+        device=q.device,
     )
     head_ratio = case.v_heads // case.k_heads
 
@@ -235,7 +240,7 @@ def _compute_recurrent_outputs(
             key_head = value_head // head_ratio
             if initial_state is None:
                 state = torch.zeros(
-                    (case.key_dim, case.value_dim), dtype=compute_dtype
+                    (case.key_dim, case.value_dim), dtype=compute_dtype, device=q.device
                 )
             else:
                 state = initial_state[sequence, value_head].to(compute_dtype).clone()
@@ -265,6 +270,8 @@ def run_golden_reference(
 
     validate_inputs(q, k, v, g, beta, case)
     initial_state = deterministic_initial_state(case)
+    if initial_state is not None:
+        initial_state = initial_state.to(q.device)
     output, final_state = _compute_recurrent_outputs(
         q, k, v, g, beta, initial_state, case
     )

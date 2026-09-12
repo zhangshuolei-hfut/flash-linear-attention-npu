@@ -24,6 +24,13 @@
 公开 `solve_tri` 来自 main 已合入的 PR 398；融合 kernel 不引用该公开实现，只有双标杆链路调用它。
 比较阈值为最大相对误差比例 5、平均相对误差比例 1.5、均方根误差比例 1.5。
 
+也支持与 KDA 一致、专门看护 PR #540 A5 大融合新路径的远端 GPU 双标杆拓扑：
+NPU 运行融合 DUT，GPU benchmark task
+运行 Torch FP64 recurrence，GPU control task 运行统一 FLA Triton forward。三路使用同一
+份 ATK 同步输入。DUT 固定使用 `layout=BSND`、`use_exp2=false`、
+默认 `use_qk_l2norm_in_kernel=false`，通过 BSND layout 进入 Prepare + H + O 拼接路径；脚本只选择
+该路径支持的 BF16、`K=V=128`、`chunk_size=64`、`HV/HK<=4` 冻结 case。
+
 ## 用例
 
 - `atk_chunk_gated_delta_rule_fwd.json`：既有泛化 500 条冻结矩阵，五种场景各 100 条，
@@ -72,6 +79,36 @@ bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_matrix.sh 0
 ```bash
 bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_double_benchmark.sh 0
 ```
+
+### GPU Triton 双标杆
+
+GPU 侧的仓库、脚本、运行目录和输出必须全部位于 `/mnt/d/golden`。GPU 机器准备
+`/mnt/d/golden/flash-linear-attention` 和
+`/mnt/d/golden/flash-linear-attention-npu` 后，在 ATK 环境中启动服务：
+
+```bash
+cd /mnt/d/golden/flash-linear-attention-npu
+bash tests/atk/chunk_gated_delta_rule_fwd/scripts/start_gpu_server.sh
+```
+
+在 A5 发起端设置 GPU 宿主机可达地址，然后执行。默认自动选择冻结矩阵内 PR #540
+支持集内的 case；烟测时通过 `GDN_ATK_CASE_IDS='[0]'` 指定单条：
+
+```bash
+export GDN_GPU_HOST=<gpu_host>
+export GDN_GPU_PORT=<gpu_host_port>
+GDN_ATK_CASE_IDS='[0]' \
+bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_gpu_double_benchmark.sh 0
+```
+
+默认验证 PR #540 新增的不做 Q/K L2Norm 分支。需要回归 L2Norm 分支时，GPU server 与
+A5 发起端必须同时设置 `GDN_ATK_USE_QK_L2NORM=true` 后重新启动并执行。
+
+远端模式必须保留 `--syc_dataset`，不得使用 `-sp`，并保持 `-mt 1`。同一 case 的日志
+应分别出现 `dut`、`benchmark`、`golden`，其中目标依次为融合 NPU、统一 Triton GPU、
+GPU FP64 recurrence。GPU 与 A5 上的 case JSON、executor、reference 和 role contract
+必须做 SHA256 一致性检查。两个节点必须使用相同的相对 `output_path`，由各自服务的工作
+目录解析；否则 ATK 26.7.8 派生 GPU golden 任务时可能把发起端绝对路径传到 GPU。
 
 复跑历史矩阵：
 
