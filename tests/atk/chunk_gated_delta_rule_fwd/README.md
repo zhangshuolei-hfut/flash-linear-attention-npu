@@ -113,3 +113,8 @@ python torch_custom/fla_npu/test/test_aclnn_ctypes_abi.py NormOutputsTest --npu
 
 以上是接口回归，不是 ATK 全量精度、梯度精度、确定性、内存或性能验收。
 本轮未执行这些正式验收项目，不能据此宣称完整 ATK 验收通过。
+
+融合调用示例已并入 `examples/flash_gated_delta_rule.py --fused-only`，无需 Triton。
+开发冒烟验证共 9 组通过：默认 T=128；T=65 下 BSND/BNSD × L2Norm 开关 × exp/exp2。
+每组前向、反向均同步完成，返回 shape、别名和有限值检查通过。仍不作为独立梯度精度结论。
+BNSD 且关闭 L2Norm、使用 exp 时会选择现有 Phase6 前向路径；需要 prepare 新路径时使用默认 BSND。

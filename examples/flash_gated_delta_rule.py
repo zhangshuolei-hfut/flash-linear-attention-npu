@@ -6,6 +6,99 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 
+def _run_fused_example():
+    """Run the two public fused operators using the installed wheel."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Ascend 950 融合前向 + 融合反向调用示例（不依赖 Triton）",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--fused-only", action="store_true", help="直接串联两个大融合接口")
+    parser.add_argument("--device", type=int, default=0, help="进程可见 NPU 编号")
+    parser.add_argument("--tokens", type=int, default=128, help="序列长度，可使用 65 验证尾块")
+    parser.add_argument("--layout", choices=("BSND", "BNSD"), default="BSND")
+    parser.add_argument("--qk-l2norm", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-exp2", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    if args.tokens <= 0:
+        parser.error("--tokens 必须大于 0")
+
+    # Initialize the package OPP before torch_npu initializes the runtime.
+    from fla_npu.ops.ascendc import (
+        npu_chunk_gated_delta_rule_fwd,
+        npu_chunk_gated_delta_rule_bwd,
+    )
+    import torch
+    import torch_npu  # noqa: F401
+
+    torch.npu.set_device(args.device)
+    if not torch.npu.get_device_name(args.device).startswith("Ascend950"):
+        raise RuntimeError("融合前后向示例需要 Ascend 950 和配套完整 wheel")
+    torch.manual_seed(args.seed)
+    device = torch.device(f"npu:{args.device}")
+    batch, tokens, hk, hv, dim = 1, args.tokens, 2, 4, 128
+    scale = dim ** -0.5
+    # Construct on CPU, then transfer; q/k/v are BF16, g/beta are FP32.
+    q = (torch.randn(batch, tokens, hk, dim) * 0.1).to(torch.bfloat16)
+    k = (torch.randn(batch, tokens, hk, dim) * 0.1).to(torch.bfloat16)
+    v = torch.randn(batch, tokens, hv, dim).to(torch.bfloat16)
+    if args.layout == "BNSD":
+        q, k, v = [x.transpose(1, 2).contiguous() for x in (q, k, v)]
+    q, k, v = [x.to(device) for x in (q, k, v)]
+    # g is the per-token natural-log gate, not a precomputed cumulative sum.
+    g = (-torch.rand(batch, tokens, hv) * 0.1).to(device)
+    beta = torch.sigmoid(torch.randn(batch, tokens, hv)).to(device)
+    h0 = torch.zeros(batch, hv, dim, dim, dtype=torch.bfloat16).to(device)
+    common = dict(layout=args.layout, chunk_size=64, use_exp2=args.use_exp2,
+                  use_qk_l2norm_in_kernel=args.qk_l2norm, initial_state=h0)
+
+    print(f"B={batch}, T={tokens}, HK={hk}, HV={hv}, K=V={dim}, "
+          f"layout={args.layout}, qk_l2norm={args.qk_l2norm}, use_exp2={args.use_exp2}", flush=True)
+    (o, final_state, g_cumsum, A, beta_eff, h,
+     q_hat, k_hat, q_rstd, k_rstd) = npu_chunk_gated_delta_rule_fwd(
+        q, k, v, g, beta, scale=scale,
+        output_final_state=True, disable_recompute=True, **common,
+    )
+    torch.npu.synchronize()
+    print("FWD_DONE", flush=True)
+
+    # Explicit upstream gradient; this example does not rely on autograd wiring.
+    d_o = torch.randn(batch, tokens, hv, dim).to(device, torch.bfloat16)
+    dq, dk, dv, d_beta, d_g, dh0, d_a_log, d_dt_bias = npu_chunk_gated_delta_rule_bwd(
+        q_hat, k_hat, v, g_cumsum, beta, A, d_o, scale,
+        q_rstd=q_rstd, k_rstd=k_rstd, dht=None, **common,
+    )
+    torch.npu.synchronize()
+    print("BWD_DONE", flush=True)
+
+    if args.qk_l2norm:
+        assert q_rstd.shape == k_rstd.shape == (batch, hk, tokens)
+    else:
+        assert q_hat is q and k_hat is k
+        assert q_rstd is None and k_rstd is None
+    assert dq.shape == q.shape and dk.shape == k.shape and dv.shape == v.shape
+    assert d_beta.shape == beta.shape and d_g.shape == g.shape and dh0.shape == h0.shape
+    assert beta_eff is None and h is None and d_a_log is None and d_dt_bias is None
+    for name, tensor in dict(o=o, final_state=final_state, g_cumsum=g_cumsum, A=A,
+                             q_hat=q_hat, k_hat=k_hat, q_rstd=q_rstd, k_rstd=k_rstd,
+                             dq=dq, dk=dk, dv=dv, d_beta=d_beta, d_g=d_g, dh0=dh0).items():
+        if tensor is None:
+            print(f"{name}: None", flush=True)
+            continue
+        if not torch.isfinite(tensor).all().item():
+            raise RuntimeError(f"{name} 包含 NaN/Inf")
+        print(f"{name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}", flush=True)
+    print("PASS: 前后向调用、返回合同及有限值检查通过（非精度/性能结论）", flush=True)
+
+
+# Dispatch before loading the full example's optional Triton dependencies.
+if __name__ == "__main__" and "--fused-only" in sys.argv:
+    _run_fused_example()
+    raise SystemExit(0)
+
+
 # Large default smoke shapes can exceed Triton-NPU's default launch-grid limit.
 os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "1"
 

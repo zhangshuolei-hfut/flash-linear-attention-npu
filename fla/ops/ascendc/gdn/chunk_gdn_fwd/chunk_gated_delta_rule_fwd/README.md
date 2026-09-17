@@ -120,6 +120,21 @@ BSND/TND 的旧 `[B,T,Hk]` rstd 输出 descriptor 不再接受。
 
 ### 直接串联示例
 
+已安装配套完整 wheel、加载 CANN 并选择可见 NPU 后，可直接运行已有示例的融合模式：
+
+```bash
+python examples/flash_gated_delta_rule.py --fused-only
+python examples/flash_gated_delta_rule.py --fused-only --tokens 65 --layout BNSD --no-qk-l2norm
+python examples/flash_gated_delta_rule.py --fused-only --no-use-exp2
+python examples/flash_gated_delta_rule.py --fused-only --help
+```
+
+该模式默认 B=1、T=128、HK=2、HV=4、K=V=128，开启 Q/K L2Norm，使用 BSND 和 exp2。
+只依赖已安装的融合算子包，不加载完整示例的 Triton 路径。打印 FWD_DONE/BWD_DONE 表示各自已同步完成，
+最后检查输出合同和有限值；这不是精度或性能结论。上游梯度 d_o 显式传入，不提供 autograd 封装。
+默认 BSND 使用 prepare 新路径；BNSD 同时关闭 L2Norm 和 exp2 时会走原 Phase6 前向路径。
+
+
 以下代码使用调用方准备的 BSND Q/K/V、BSN g/beta 及上游梯度 d_o，K=V=128、chunk_size=64。
 `use_qk_l2norm` 可取 True 或 False；关闭时返回的 q_hat/k_hat 就是原始输入。
 
